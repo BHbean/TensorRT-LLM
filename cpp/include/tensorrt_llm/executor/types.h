@@ -364,6 +364,15 @@ struct IterationStats
     std::optional<SpecDecodingStats> specDecodingStats;
 };
 
+/// @brief Struct that holds current load stats
+struct LoadStats
+{
+    /// @brief Number of active requests
+    SizeType32 numActiveRequests;
+    /// @brief Number of queued requests
+    SizeType32 numQueuedRequests;
+};
+
 /// @brief Enum class that represents the state of a request
 enum class RequestStage
 {

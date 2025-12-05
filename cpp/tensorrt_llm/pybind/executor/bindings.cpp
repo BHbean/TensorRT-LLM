@@ -164,6 +164,14 @@ void initBindings(pybind11::module_& m)
             [](tle::IterationStats const& iterationStats)
             { return tle::JsonSerialization::toJsonStr(iterationStats); });
 
+    py::class_<tle::LoadStats>(m, "LoadStats")
+        .def(py::init<>())
+        .def_readwrite("num_active_requests", &tle::LoadStats::numActiveRequests)
+        .def_readwrite("num_queued_requests", &tle::LoadStats::numQueuedRequests)
+        .def("to_json_str",
+            [](tle::LoadStats const& loadStats)
+            { return tle::JsonSerialization::toJsonStr(loadStats); });
+
     py::class_<tle::DebugTensorsPerIteration>(m, "DebugTensorsPerIteration")
         .def(py::init<>())
         .def_readwrite("iter", &tle::DebugTensorsPerIteration::iter)

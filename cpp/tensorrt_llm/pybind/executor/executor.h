@@ -110,6 +110,11 @@ public:
         return mExecutor->getLatestDebugTensors();
     }
 
+    tle::LoadStats getCurrentLoadStats()
+    {
+        return mExecutor->getCurrentLoadStats();
+    }
+
     [[nodiscard]] bool canEnqueueRequests() const
     {
         return mExecutor->canEnqueueRequests();

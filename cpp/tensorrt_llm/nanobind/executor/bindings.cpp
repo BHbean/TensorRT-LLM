@@ -164,6 +164,14 @@ void initBindings(nb::module_& m)
             [](tle::IterationStats const& iterationStats)
             { return tle::JsonSerialization::toJsonStr(iterationStats); });
 
+    nb::class_<tle::LoadStats>(m, "LoadStats")
+        .def(nb::init<>())
+        .def_rw("num_active_requests", &tle::LoadStats::numActiveRequests)
+        .def_rw("num_queued_requests", &tle::LoadStats::numQueuedRequests)
+        .def("to_json_str",
+            [](tle::LoadStats const& loadStats)
+            { return tle::JsonSerialization::toJsonStr(loadStats); });
+
     nb::class_<tle::DebugTensorsPerIteration>(m, "DebugTensorsPerIteration")
         .def(nb::init<>())
         .def_rw("iter", &tle::DebugTensorsPerIteration::iter)

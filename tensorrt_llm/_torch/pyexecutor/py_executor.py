@@ -19,7 +19,7 @@ from tensorrt_llm._utils import (customized_gc_thresholds, global_mpi_rank,
                                  is_trace_enabled, nvtx_range, trace_func)
 from tensorrt_llm.bindings.executor import (DisServingRequestStats,
                                             FinishReason, InflightBatchingStats,
-                                            IterationStats, KvCacheStats,
+                                            IterationStats, KvCacheStats, LoadStats,
                                             RequestStage, RequestStats,
                                             SpecDecodingStats,
                                             StaticBatchingStats)
@@ -377,6 +377,15 @@ class PyExecutor:
 
         events = kv_cache_manager.get_latest_events(0)
         return events
+
+    def get_current_load_stats(self) -> LoadStats:
+        """
+        Returns the current load statistics of the executor.
+        """
+        load_stats = LoadStats()
+        load_stats.num_active_requests = len(self.active_requests)
+        load_stats.num_queued_requests = self.executor_request_queue.get_request_queue_size()
+        return load_stats
 
     def wait_shutdown(self):
         self.shutdown_event.wait()

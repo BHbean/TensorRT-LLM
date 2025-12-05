@@ -1848,6 +1848,10 @@ public:
     /// @return Request stats grouped by iterations
     std::deque<RequestStatsPerIteration> getLatestRequestStats();
 
+    /// @brief  Returns the current load stats.
+    /// @return Load stats
+    LoadStats getCurrentLoadStats();
+
     /// @brief  Returns the debug tensors of each iteration computed since last call to getLatestDebugTensors.
     ///         Contains at most debugTensorsMaxIterations iterations.
     /// @return Request debug tensors grouped by iterations
@@ -1878,6 +1882,9 @@ public:
 
     /// @brief Utility function to convert a requestStats struct to a json serialized string
     [[nodiscard]] static std::string toJsonStr(RequestStats const& requestStats);
+
+    /// @brief Utility function to convert a loadStats struct to a json serialized string
+    [[nodiscard]] static std::string toJsonStr(LoadStats const& loadStats);
 };
 
 } // namespace tensorrt_llm::executor

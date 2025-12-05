@@ -478,6 +478,24 @@ class BaseLLM:
         return self._executor.aget_stats(timeout=timeout)
 
     @set_api_status("beta")
+    def get_load_stats(self) -> tllm.LoadStats:
+        '''Get current load statistics from the runtime.
+
+        Returns:
+            tensorrt_llm.bindings.executor.LoadStats: The current load statistics.
+        '''
+        return self._executor.get_current_load_stats()
+    
+    @set_api_status("beta")
+    def get_load_stats_async(self) -> tllm.LoadStats:
+        '''Get current load statistics from the runtime.
+
+        Returns:
+            tensorrt_llm.bindings.executor.LoadStats: The current load statistics.
+        '''
+        return self._executor.aget_current_load_stats()
+
+    @set_api_status("beta")
     def get_kv_cache_events(self, timeout: Optional[float] = 2) -> List[dict]:
         '''Get iteration KV events from the runtime.
 

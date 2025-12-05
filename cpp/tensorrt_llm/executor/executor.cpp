@@ -112,6 +112,11 @@ std::deque<RequestStatsPerIteration> Executor::getLatestRequestStats()
     return mImpl->getLatestRequestStats();
 }
 
+LoadStats Executor::getCurrentLoadStats()
+{
+    return mImpl->getCurrentLoadStats();
+}
+
 std::deque<DebugTensorsPerIteration> Executor::getLatestDebugTensors()
 {
     return mImpl->getLatestDebugTensors();

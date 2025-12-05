@@ -4,6 +4,7 @@ import threading
 import time
 import weakref
 from typing import Dict, Optional, Union
+import asyncio
 
 import torch
 import zmq
@@ -21,7 +22,7 @@ from ..llmapi.utils import (AsyncQueue, ManagedThread, _SyncQueue,
 from .executor import GenerationExecutor
 from .ipc import FusedIpcQueue, IpcQueue
 from .postproc_worker import PostprocWorkerConfig
-from .request import CancellingRequest, GenerationRequest
+from .request import CancellingRequest, GenerationRequest, LoadStatsRequest
 from .result import GenerationResult, IterationResult
 from .utils import (ErrorResponse, IntraProcessQueue, WorkerCommIpcAddrs,
                     create_mpi_comm_session, get_spawn_proxy_process_env,
@@ -131,6 +132,10 @@ class GenerationExecutorProxy(GenerationExecutor):
         self.mp_stats_queue = FusedIpcQueue(is_server=True,
                                             fuse_message=False,
                                             name="proxy_stats_queue")
+        self.load_stats_queue = FusedIpcQueue(
+            is_server=True,
+            fuse_message=False,
+            name="proxy_load_stats_queue")
         self.kv_cache_events_queue = FusedIpcQueue(
             is_server=True,
             fuse_message=False,
@@ -140,6 +145,7 @@ class GenerationExecutorProxy(GenerationExecutor):
             worker_init_status_queue_addr=self.worker_init_status_queue.address,
             result_queue_addr=self.result_queue.address,
             stats_queue_addr=self.mp_stats_queue.address,
+            load_stats_queue_addr=self.load_stats_queue.address,
             kv_cache_events_queue_addr=self.kv_cache_events_queue.address,
         )
 
@@ -432,6 +438,34 @@ class GenerationExecutorProxy(GenerationExecutor):
 
     def __enter__(self):
         return self
+
+    def get_current_load_stats(self) -> dict:
+        """Get current load statistics from the worker.
+        
+        This method sends a LoadStatsRequest to the worker and returns a LoadResult
+        object that can be used to retrieve the statistics through the dedicated stats queue.
+        
+        Returns:
+            LoadResult: A result object that can be used to get load statistics.
+        """
+        # return load_result
+        self.request_queue.put(LoadStatsRequest())
+        data = self.load_stats_queue.get()
+        return data
+    
+    async def aget_current_load_stats(self) -> dict:
+        """Asynchronously get current load statistics from the worker.
+        
+        This method sends a LoadStatsRequest to the worker and returns a LoadResult
+        object that can be used to retrieve the statistics through the dedicated stats queue.
+        
+        Returns:
+            LoadResult: A result object that can be used to get load statistics.
+        """
+        
+        self.request_queue.put(LoadStatsRequest())
+        data = await asyncio.to_thread(self.load_stats_queue.get)
+        return data
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.shutdown()

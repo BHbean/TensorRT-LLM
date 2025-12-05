@@ -134,3 +134,10 @@ class CancellingRequest:
 
     def __init__(self, id: int):
         self.id = id
+
+
+class LoadStatsRequest:
+    ''' The request to get current load statistics. '''
+    
+    def __init__(self):
+        pass

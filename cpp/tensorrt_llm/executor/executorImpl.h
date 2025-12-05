@@ -121,6 +121,7 @@ public:
     std::deque<IterationStats> getLatestIterationStats();
     std::deque<RequestStatsPerIteration> getLatestRequestStats();
     std::deque<DebugTensorsPerIteration> getLatestDebugTensors();
+    LoadStats getCurrentLoadStats();
 
     bool canEnqueueRequests() const;
 
@@ -296,6 +297,10 @@ private:
     IterationType mRequestStatsMaxIterations;
     std::mutex mRequestStatsMtx;
     std::deque<RequestStatsPerIteration> mRequestStats;
+
+    // Load stats
+    std::atomic<SizeType32> mNumActiveRequestsRealTime{0};
+    std::atomic<SizeType32> mNumQueuedRequestsRealTime{0};
 
     // Debug
     IterationType mDebugTensorsMaxIterations;

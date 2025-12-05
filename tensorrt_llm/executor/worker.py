@@ -33,8 +33,8 @@ from .executor import GenerationExecutor, IterationResultQueue
 from .ipc import FusedIpcQueue, IpcQueue
 from .postproc_worker import (PostprocParams, PostprocWorker,
                               PostprocWorkerConfig, postproc_worker_main)
-from .request import (CancellingRequest, GenerationRequest, LoRARequest,
-                      PromptAdapterRequest)
+from .request import (CancellingRequest, GenerationRequest, LoadStatsRequest,
+                      LoRARequest, PromptAdapterRequest)
 from .result import (GenerationResult, IterationResult, LogProbsResult,
                      ResponseWrapper, compute_logprobs)
 from .utils import (ErrorResponse, IntraProcessQueue, RequestError,
@@ -339,6 +339,9 @@ class GenerationExecutorWorker(GenerationExecutor):
                 self.kv_events_queues, self.engine.get_latest_kv_cache_events,
                 self._iter_kv_events_result,
                 lambda x: json.dumps(KVCacheEventSerializer.serialize(x)))
+
+    def get_current_load_stats(self) -> tllm.LoadStats:
+        return self.engine.get_current_load_stats()
 
     def start(self):
         # create iteration result queues
@@ -665,6 +668,7 @@ def worker_main(
 
     result_queue: Optional[IpcQueue] = None
     result_queues: Optional[List[IpcQueue]] = None
+    load_stats_queue: Optional[FusedIpcQueue] = None
 
     postproc_worker_config = postproc_worker_config or PostprocWorkerConfig()
 
@@ -696,6 +700,10 @@ def worker_main(
                                        is_server=False,
                                        fuse_message=True,
                                        name="worker_stats_queue")
+        load_stats_queue = IpcQueue(
+            worker_queues.load_stats_queue_addr,
+            is_server=False,
+            name="worker_load_stats_queue")
         kv_cache_events_queue = FusedIpcQueue(
             worker_queues.kv_cache_events_queue_addr,
             is_server=False,
@@ -803,6 +811,16 @@ def worker_main(
                 while (req := request_queue.get()) is not None:
                     if isinstance(req, CancellingRequest):
                         worker.abort_request(req.id)
+                    elif isinstance(req, LoadStatsRequest):
+                        # Handle load stats request - use dedicated stats queue
+                        try:
+                            load_stats = worker.get_current_load_stats()
+                            # Send load stats through dedicated stats queue
+                            load_stats_queue.put(load_stats.to_json_str())
+                        except Exception as e:
+                            logger.error(f"get_current_load_stats failed: {e}")
+                            # Send error through stats queue as well
+                            load_stats_queue.put(None)
                     elif isinstance(req, GenerationRequest):
                         try:
                             worker.submit(req)

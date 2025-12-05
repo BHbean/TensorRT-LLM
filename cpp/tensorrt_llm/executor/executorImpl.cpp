@@ -1807,10 +1807,12 @@ IterationStats Executor::Impl::getCurrentIterationStats(RequestList const& activ
     stats.newActiveRequestsQueueLatencyMS = newActiveRequestsQueueLatencyMS;
     // Active request count
     stats.numActiveRequests = static_cast<SizeType32>(activeRequests.size());
+    mNumActiveRequestsRealTime.store(stats.numActiveRequests, std::memory_order_relaxed);
     // Queued request count
     {
         std::scoped_lock<std::mutex> lck(mQueuedReqMtx);
         stats.numQueuedRequests = static_cast<SizeType32>(mQueuedRequests.size());
+        mNumQueuedRequestsRealTime.store(stats.numQueuedRequests, std::memory_order_relaxed);
     }
     stats.numCompletedRequests = numCompletedRequests;
     // Max number of requests
@@ -1823,6 +1825,14 @@ IterationStats Executor::Impl::getCurrentIterationStats(RequestList const& activ
 
     // Model specific stats
     mModel->getCurrentIterationStats(stats);
+    return stats;
+}
+
+LoadStats Executor::Impl::getCurrentLoadStats()
+{
+    LoadStats stats;
+    stats.numActiveRequests = mNumActiveRequestsRealTime.load(std::memory_order_relaxed);
+    stats.numQueuedRequests = mNumQueuedRequestsRealTime.load(std::memory_order_relaxed);
     return stats;
 }
 
