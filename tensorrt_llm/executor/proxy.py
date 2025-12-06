@@ -5,6 +5,7 @@ import time
 import weakref
 from typing import Dict, Optional, Union
 import asyncio
+import json
 
 import torch
 import zmq
@@ -446,12 +447,12 @@ class GenerationExecutorProxy(GenerationExecutor):
         object that can be used to retrieve the statistics through the dedicated stats queue.
         
         Returns:
-            LoadResult: A result object that can be used to get load statistics.
+            dict: A result object that can be used to get load statistics.
         """
         # return load_result
         self.request_queue.put(LoadStatsRequest())
         data = self.load_stats_queue.get()
-        return data
+        return json.loads(data)
     
     async def aget_current_load_stats(self) -> dict:
         """Asynchronously get current load statistics from the worker.
@@ -465,7 +466,7 @@ class GenerationExecutorProxy(GenerationExecutor):
         
         self.request_queue.put(LoadStatsRequest())
         data = await asyncio.to_thread(self.load_stats_queue.get)
-        return data
+        return json.loads(data)
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.shutdown()
