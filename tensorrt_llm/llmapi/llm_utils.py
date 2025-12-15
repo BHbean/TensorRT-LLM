@@ -592,6 +592,7 @@ class CachedModelLoader:
         mpi_session: Optional[MpiSession] = None,
         workspace: Optional[str] = None,
     ):
+        logger.info("hyc: CachedModelLoader init begin")
         self.llm_args = llm_args
         self.mpi_session = mpi_session
         self._workspace = workspace or tempfile.TemporaryDirectory()
@@ -600,6 +601,8 @@ class CachedModelLoader:
         # This is used for build cache. To compute the cache key, a local HF model is required, it could be download
         # from HF model hub, so this helps to hold the path.
         self._hf_model_dir: Optional[Path] = None
+
+        logger.info("hyc: CachedModelLoader init end")
 
     @property
     def workspace(self) -> Path:

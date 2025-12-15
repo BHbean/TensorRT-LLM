@@ -211,7 +211,11 @@ class BaseLLM:
             self.runtime_context: Optional[_ModelRuntimeContext] = None
             self.llm_build_stats = LlmBuildStats()
 
+            logger.info("hyc: will build model")
+
             self._build_model()
+
+            logger.info("hyc: BaseLLM init _build_model end")
 
         except Exception:
             if self.mpi_session is not None:
@@ -655,12 +659,14 @@ class BaseLLM:
                 f"to be passed explicitly to the `LLM()` constructor.")
 
     def _build_model(self):
+        logger.info("hyc: _build_model function of BaseLLM begin")
         model_loader = CachedModelLoader(self.args,
                                          mpi_session=self.mpi_session,
                                          workspace=self._workspace,
                                          llm_build_stats=weakref.proxy(
                                              self.llm_build_stats))
         self._engine_dir, self._hf_model_dir = model_loader()
+        logger.info("hyc: _build_model function of BaseLLM end")
 
     @property
     def _on_trt_backend(self) -> bool:
@@ -970,6 +976,7 @@ class _TorchLLM(BaseLLM):
                          **kwargs)
 
     def _build_model(self):
+        logger.info("hyc: _build_model function of _TorchLLM begin")
         super()._build_model()
         assert self._engine_dir is None
 
@@ -977,13 +984,15 @@ class _TorchLLM(BaseLLM):
         # It should also be before bindings ExecutorConfig, which may depend on tokenizer info.
         self._tokenizer = self._try_load_tokenizer()
 
+        logger.info("hyc: create_input_processor")
+
         # Multimodal special handling:
         # 1. Default load_tokenizer may fail because MM has different tokenizer configuration. Hence we initialize it inside input processor
         # 2. May need to modify model weights for MM (e.g., resize vocab embedding). We must do such operation via input processor's __init__
         self.input_processor = create_input_processor(self._hf_model_dir,
                                                       self.tokenizer)
         self.tokenizer = self.input_processor.tokenizer
-
+        
         max_batch_size = self.args.max_batch_size
         max_num_tokens = self.args.max_num_tokens
         max_seq_len = self.args.max_seq_len
@@ -1007,15 +1016,20 @@ class _TorchLLM(BaseLLM):
         if self.args.kv_cache_config is not None:
             self._executor_config.kv_cache_config = PybindMirror.maybe_to_pybind(
                 self.args.kv_cache_config)
+
         if os.getenv("FORCE_DETERMINISTIC", "0") == "1":
             # Disable KV cache reuse for deterministic mode
             self._executor_config.kv_cache_config.enable_block_reuse = False
             self._executor_config.kv_cache_config.enable_partial_reuse = False
+            
         if self.args.peft_cache_config is not None:
             self._executor_config.peft_cache_config = PybindMirror.maybe_to_pybind(
                 self.args.peft_cache_config)
+            
+
         if self.args.decoding_config is not None:
             self._executor_config.decoding_config = self.args.decoding_config
+
         if self.args.guided_decoding_backend == 'xgrammar':
             self._executor_config.guided_decoding_config = tllm.GuidedDecodingConfig(
                 backend=tllm.GuidedDecodingConfig.GuidedDecodingBackend.
@@ -1033,19 +1047,23 @@ class _TorchLLM(BaseLLM):
 
         if self._on_trt_backend:
             self._executor_config.normalize_log_probs = self.args.normalize_log_probs
+
         self._executor_config.enable_chunked_context = self.args.enable_chunked_prefill
         self._executor_config.max_beam_width = self.args.max_beam_width
+
         if self.args.cache_transceiver_config is not None:
             self._executor_config.cache_transceiver_config = PybindMirror.maybe_to_pybind(
                 self.args.cache_transceiver_config)
         from tensorrt_llm._torch.pyexecutor.config import update_executor_config
 
         spec_config = self.args.speculative_config
+
         max_batch_size = self._executor_config.max_batch_size
         # Apply default heuristic to AutoDecodingConfig based on benchmark results
         # With concurrency <= 4, max_draft_len = 5, max_matching_ngram_size = 3
         # With concurrency <= 32, max_draft_len = 3, max_matching_ngram_size = 5
         # With concurrency > 32, speculative decoding is disabled.
+
         if spec_config is not None and spec_config.decoding_type == "AUTO":
             if not self.args.disable_overlap_scheduler:
                 logger.info(
@@ -1069,6 +1087,8 @@ class _TorchLLM(BaseLLM):
                 f"Apply heuristic to incomplete NGramDecodingConfig: max_draft_len={spec_config.max_draft_len}, max_matching_ngram_size={spec_config.max_matching_ngram_size}"
             )
 
+        logger.info("hyc: update_executor_config")
+
         update_executor_config(
             self._executor_config,
             backend=self.args.backend,
@@ -1087,6 +1107,8 @@ class _TorchLLM(BaseLLM):
         # TODO: revisit gather_context_logits
         return_logits = self.args.gather_generation_logits
 
+        logger.info("hyc: executor will begin")
+
         self._executor = self._executor_cls.create(
             self._engine_dir,
             executor_config=self._executor_config,
@@ -1104,6 +1126,8 @@ class _TorchLLM(BaseLLM):
             lora_config=self.args.lora_config,
             garbage_collection_gen0_threshold=self.args.
             garbage_collection_gen0_threshold)
+
+        logger.info("hyc: _build_model function of _TorchLLM end")
 
     def _validate_args_for_torch_backend(self, kwargs: dict) -> None:
         """Validate that users don't pass TrtLlmArgs-specific arguments when using PyTorch backend.

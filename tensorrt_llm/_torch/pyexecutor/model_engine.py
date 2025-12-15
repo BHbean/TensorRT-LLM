@@ -263,12 +263,22 @@ class PyTorchModelEngine(ModelEngine):
         lora_config: Optional[LoraConfig] = None,
         is_draft_model: bool = False,
     ):
+        logger.info("hyc: PyTorchModelEngine() init begin")
+
+        # =========================================================================
+        # hyc: 初始化基本参数
+        # =========================================================================
+        logger.info("hyc: label_01")
         self.ub_buffers = None
         self.batch_size = batch_size
         self.max_num_tokens = max_num_tokens
         self.max_seq_len = max_seq_len
         self.max_beam_width = max_beam_width
 
+        # =========================================================================
+        # hyc: 并行策略相关（TP / PP / Expert Parallel / Dist）
+        # =========================================================================
+        logger.info("hyc: label_02")
         self.mapping = mapping
         if mapping.has_pp():
             init_pp_comm(mapping)
@@ -276,6 +286,11 @@ class PyTorchModelEngine(ModelEngine):
         if dist is not None:
             ExpertStatistic.create(self.dist.rank)
         self.pytorch_backend_config = pytorch_backend_config
+
+        # =========================================================================
+        # hyc: Spec decode / LoRA 等配置初始化
+        # =========================================================================
+        logger.info("hyc: label_03")
         self.spec_config = spec_config
         self.is_spec_decode = spec_config is not None
         self.enable_spec_decode = self.is_spec_decode
@@ -283,10 +298,20 @@ class PyTorchModelEngine(ModelEngine):
 
         self.in_warmup = False
 
+        # =========================================================================
+        # hyc: 创建 AttentionRuntimeFeatures
+        # =========================================================================
+        logger.info("hyc: label_04")
         self.attn_runtime_features = attn_runtime_features or AttentionRuntimeFeatures(
         )
 
         attn_backend = pytorch_backend_config.attn_backend
+
+        # =========================================================================
+        # hyc: 真正加载模型的地方
+        # =========================================================================
+        logger.info("hyc: label_05")
+        logger.info("hyc: call _load_model() begin")
         self.model = self._load_model(
             model_path,
             mapping=self.mapping,
@@ -298,6 +323,7 @@ class PyTorchModelEngine(ModelEngine):
             moe_max_num_tokens=pytorch_backend_config.moe_max_num_tokens,
             moe_load_balancer=pytorch_backend_config.moe_load_balancer,
             lora_config=lora_config)
+        logger.info("hyc: call _load_model() end")
         # In case that some tests use stub models and override `_load_model`.
         if not hasattr(self.model, 'extra_attrs'):
             self.model.extra_attrs = {}
@@ -437,6 +463,8 @@ class PyTorchModelEngine(ModelEngine):
                 dtype=torch.int32)
         else:
             self.cache_indirection_attention = None
+
+        logger.info("hyc: PyTorchModelEngine() init end")
 
     def set_lora_model_config(self,
                               lora_target_modules: list[str],
@@ -1026,6 +1054,8 @@ class PyTorchModelEngine(ModelEngine):
             allreduce_strategy=self.pytorch_backend_config.allreduce_strategy,
             **kwargs)
 
+        logger.info("hyc: _load_model() begin")
+
         validate_and_set_kv_cache_quant(
             config, self.pytorch_backend_config.kv_cache_dtype)
         num_layers = int(os.environ.get("TLLM_OVERRIDE_LAYER_NUM", "0"))
@@ -1098,6 +1128,8 @@ class PyTorchModelEngine(ModelEngine):
                 logger.info("moe_load_balancer finalize model done")
 
             torch.cuda.current_stream().synchronize()
+        
+        logger.info("hyc: _load_model() end")
         return model
 
     def _call_load_weights(self, load_method, weights, weight_mapper):

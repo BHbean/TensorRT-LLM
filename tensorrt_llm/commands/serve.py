@@ -161,8 +161,10 @@ def launch_server(host: str,
     model = llm_args["model"]
 
     if backend == 'pytorch':
+        logger.info("hyc: backend == pytorch")
         llm = PyTorchLLM(**llm_args)
     else:
+        logger.info("hyc: backend != pytorch")
         llm = LLM(**llm_args)
 
     server = OpenAIServer(llm=llm,

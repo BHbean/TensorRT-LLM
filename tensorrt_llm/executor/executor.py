@@ -79,6 +79,8 @@ class GenerationExecutor(ABC):
                  num_postprocess_workers: int = 0,
                  postprocess_tokenizer_dir: Optional[str] = None,
                  is_llm_executor: Optional[bool] = None):
+        logger.info("hyc: GenerationExecutor init begin")
+        
         self.postproc_config = PostprocWorkerConfig(
             num_postprocess_workers=num_postprocess_workers,
             postprocess_tokenizer_dir=postprocess_tokenizer_dir)
@@ -100,6 +102,8 @@ class GenerationExecutor(ABC):
         self._is_llm_executor = is_llm_executor
         self._iter_kv_events_result: IterationResult | None = None
         self._iter_stats_result: IterationResult | None = None
+
+        logger.info("hyc: GenerationExecutor init end")
 
     @abstractmethod
     def submit(self, request: GenerationRequest) -> GenerationResult:
@@ -356,6 +360,8 @@ class GenerationExecutor(ABC):
         lora_config: Optional[LoraConfig] = None,
         garbage_collection_gen0_threshold: Optional[int] = None,
     ) -> Union["GenerationExecutorProxy", "GenerationExecutorWorker"]:
+
+        logger.info("hyc: GenerationExecutor's create function begin")
         # local imports to avoid cyclic importing
         from .proxy import GenerationExecutorProxy
         from .worker import GenerationExecutorWorker
@@ -414,12 +420,12 @@ class GenerationExecutor(ABC):
                                             is_llm_executor=is_llm_executor,
                                             garbage_collection_gen0_threshold=
                                             garbage_collection_gen0_threshold)
-
         # For single-gpu case:
         # Partition the workload to multiple process for streaming performance.
         # While this requires uses to protect their entrypoint to
         # `if __name__ == "__main__":`.
         if not platform.system() == 'Windows':
+            logger.info("hyc: enter Windows")
             return GenerationExecutorProxy(
                 worker_kwargs,
                 model_world_size=model_world_size,
@@ -441,6 +447,8 @@ class GenerationExecutor(ABC):
                 is_llm_executor=is_llm_executor,
                 garbage_collection_gen0_threshold=
                 garbage_collection_gen0_threshold)
+
+        logger.info("hyc: GenerationExecutor's create function end")
 
     def wait_first_completed(
         self, futures: List[GenerationResult]
