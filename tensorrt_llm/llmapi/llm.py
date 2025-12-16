@@ -211,11 +211,7 @@ class BaseLLM:
             self.runtime_context: Optional[_ModelRuntimeContext] = None
             self.llm_build_stats = LlmBuildStats()
 
-            logger.info("hyc: will build model")
-
             self._build_model()
-
-            logger.info("hyc: BaseLLM init _build_model end")
 
         except Exception:
             if self.mpi_session is not None:
@@ -659,14 +655,12 @@ class BaseLLM:
                 f"to be passed explicitly to the `LLM()` constructor.")
 
     def _build_model(self):
-        logger.info("hyc: _build_model function of BaseLLM begin")
         model_loader = CachedModelLoader(self.args,
                                          mpi_session=self.mpi_session,
                                          workspace=self._workspace,
                                          llm_build_stats=weakref.proxy(
                                              self.llm_build_stats))
         self._engine_dir, self._hf_model_dir = model_loader()
-        logger.info("hyc: _build_model function of BaseLLM end")
 
     @property
     def _on_trt_backend(self) -> bool:
@@ -772,8 +766,12 @@ class _TrtLLM(BaseLLM):
                  dtype: str = "auto",
                  revision: Optional[str] = None,
                  tokenizer_revision: Optional[str] = None,
+                 lazy_load: bool = False,
                  **kwargs: Any) -> None:
         # TODO: deprecate backend in LLM kwargs
+        
+        # Set lazy_load before calling super().__init__() because _build_model() needs it
+        self.lazy_load = lazy_load
 
         super().__init__(model, tokenizer, tokenizer_mode, skip_tokenizer_init,
                          trust_remote_code, tensor_parallel_size, dtype,
@@ -934,7 +932,21 @@ class _TrtLLM(BaseLLM):
                 postprocess_tokenizer_dir=self.args.postprocess_tokenizer_dir,
             ),
             is_llm_executor=True,
-            lora_config=lora_config)
+            lora_config=lora_config,
+            lazy_load=self.lazy_load)
+
+    def lazy_load_model(self) -> None:
+        """Lazy load the model engine if it was not loaded during initialization.
+        This function should be called only when `lazy_load` parameter is set to True during LLM initialization.
+        """
+        if not self.lazy_load:
+            logger.warning(
+                "LLM was not initialized with lazy_load=True, cannot call lazy_load_model()."
+            )
+            return
+        if self._executor is not None:
+            self._executor.trigger_model_load()
+            return
 
 
 @append_docstring(TORCH_LLM_DOCSTRING)
@@ -976,15 +988,12 @@ class _TorchLLM(BaseLLM):
                          **kwargs)
 
     def _build_model(self):
-        logger.info("hyc: _build_model function of _TorchLLM begin")
         super()._build_model()
         assert self._engine_dir is None
 
         # Tokenizer loading should be after calling model_loader(), since model_loader() may download the model from HF hub.
         # It should also be before bindings ExecutorConfig, which may depend on tokenizer info.
         self._tokenizer = self._try_load_tokenizer()
-
-        logger.info("hyc: create_input_processor")
 
         # Multimodal special handling:
         # 1. Default load_tokenizer may fail because MM has different tokenizer configuration. Hence we initialize it inside input processor
@@ -1087,8 +1096,6 @@ class _TorchLLM(BaseLLM):
                 f"Apply heuristic to incomplete NGramDecodingConfig: max_draft_len={spec_config.max_draft_len}, max_matching_ngram_size={spec_config.max_matching_ngram_size}"
             )
 
-        logger.info("hyc: update_executor_config")
-
         update_executor_config(
             self._executor_config,
             backend=self.args.backend,
@@ -1107,8 +1114,6 @@ class _TorchLLM(BaseLLM):
         # TODO: revisit gather_context_logits
         return_logits = self.args.gather_generation_logits
 
-        logger.info("hyc: executor will begin")
-
         self._executor = self._executor_cls.create(
             self._engine_dir,
             executor_config=self._executor_config,
@@ -1126,8 +1131,6 @@ class _TorchLLM(BaseLLM):
             lora_config=self.args.lora_config,
             garbage_collection_gen0_threshold=self.args.
             garbage_collection_gen0_threshold)
-
-        logger.info("hyc: _build_model function of _TorchLLM end")
 
     def _validate_args_for_torch_backend(self, kwargs: dict) -> None:
         """Validate that users don't pass TrtLlmArgs-specific arguments when using PyTorch backend.

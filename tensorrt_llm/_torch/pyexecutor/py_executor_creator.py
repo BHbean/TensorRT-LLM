@@ -188,8 +188,6 @@ def create_py_executor(
         lora_config: Optional[LoraConfig] = None,
         garbage_collection_gen0_threshold: Optional[int] = None) -> PyExecutor:
 
-    logger.info("hyc: create_py_executor() begin")
-
     # =========================================================================
     # hyc: Part1: 对 executor_config 做一些预处理
     # =========================================================================
@@ -230,7 +228,6 @@ def create_py_executor(
     # =========================================================================
     # hyc: Part5: 开始最重要阶段：MODEL_ENGINE_MAIN，在这里进行load weights
     # =========================================================================
-    logger.info("hyc: create_py_executor() call PyTorchModelEngine() begin")
 
     with mem_monitor.observe_creation_stage(
             _ExecutorCreationStage.MODEL_ENGINE_MAIN):
@@ -249,13 +246,10 @@ def create_py_executor(
             checkpoint_loader=executor_config.checkpoint_loader,
         )
 
-    logger.info("hyc: create_py_executor() call PyTorchModelEngine() end")
-
     # =========================================================================
     # hyc: Part6: 可选：draft（speculative）模型
     # =========================================================================
     if has_draft_model_engine:
-        logger.info("hyc: it's a draftmodel")
         with mem_monitor.observe_creation_stage(
                 _ExecutorCreationStage.MODEL_ENGINE_DRAFT):
             draft_spec_config = copy.copy(spec_config)
@@ -283,7 +277,6 @@ def create_py_executor(
             draft_model_engine.load_weights_from_target_model(
                 model_engine.model)
     else:
-        logger.info("hyc: it's not a draftmodel")
         draft_model_engine = None
 
     # =========================================================================
@@ -470,7 +463,5 @@ def create_py_executor(
     _adjust_torch_mem_fraction(executor_config.pytorch_backend_config)
 
     py_executor.start_worker()
-
-    logger.info("hyc: create_py_executor() end")
 
     return py_executor

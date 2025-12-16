@@ -34,7 +34,7 @@ from .ipc import FusedIpcQueue, IpcQueue
 from .postproc_worker import (PostprocParams, PostprocWorker,
                               PostprocWorkerConfig, postproc_worker_main)
 from .request import (CancellingRequest, GenerationRequest, LoadStatsRequest,
-                      LoRARequest, PromptAdapterRequest)
+                      LoRARequest, PromptAdapterRequest, LazyLoadRequest)
 from .result import (GenerationResult, IterationResult, LogProbsResult,
                      ResponseWrapper, compute_logprobs)
 from .utils import (ErrorResponse, IntraProcessQueue, RequestError,
@@ -59,13 +59,8 @@ class GenerationExecutorWorker(GenerationExecutor):
         is_llm_executor: Optional[bool] = None,
         lora_config: Optional[LoraConfig] = None,
         garbage_collection_gen0_threshold: Optional[int] = None,
-        # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-        # hyc: 新增可选参数
-        # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-        lazy_load: bool = True,  # 新增
+        lazy_load: bool = True,  # 
     ) -> None:
-
-        logger.info("hyc: GenerationExecutorWorker init begin")
 
         # ==================================================================
         # hyc: Part1: 调用父类 GenerationExecutor 初始化
@@ -73,19 +68,15 @@ class GenerationExecutorWorker(GenerationExecutor):
 
         postproc_config = postproc_worker_config or PostprocWorkerConfig()
 
-        logger.info("hyc: Worker call Executor init begin")
         super().__init__(
             num_postprocess_workers=postproc_config.num_postprocess_workers,
             postprocess_tokenizer_dir=postproc_config.postprocess_tokenizer_dir,
             is_llm_executor=is_llm_executor,
         )
-        logger.info("hyc: Worker call Executor init end")
 
         # ==================================================================
         # hyc: Part2: 运行时字段初始化（rank / 队列 / id 映射）
         # ==================================================================
-
-        logger.info("hyc: parameter initialization begin")
 
         self.engine = None
         self.result_queue: Optional[IpcQueue] = None
@@ -114,179 +105,161 @@ class GenerationExecutorWorker(GenerationExecutor):
         executor_config.logits_post_processor_config = tllm.LogitsPostProcessorConfig(
             processor_batched=batched_logits_processor, replicate=False)
 
-        logger.info("hyc: parameter initialization end")
-
-        # ==================================================================
-        # hyc: Part3: 核心：创建模型 engine（模型加载就在这里！）
-        # ==================================================================
-
-        logger.info("hyc: define _create_engine()")
-        def _create_engine():
-            device_id = self.global_rank % torch.cuda.device_count()
-            torch.cuda.set_device(device_id)
-
-            # Make sure C++ executor would use same devices/ranks as py_executor
-            global_rank = global_mpi_rank()
-            comm_ranks = mpi_comm().allgather(global_rank)
-            device_ids = mpi_comm().allgather(device_id)
-            executor_config.parallel_config = tllm.ParallelConfig(
-                participant_ids=comm_ranks, device_ids=device_ids)
-
-            if isinstance(engine, Engine):
-                return tllm.Executor(engine.engine,
-                                     json.dumps(engine.config.to_dict(),
-                                                cls=ConfigEncoder),
-                                     tllm.ModelType.DECODER_ONLY,
-                                     executor_config=executor_config,
-                                     managed_weights=engine.managed_weights)
-
-            if not hasattr(executor_config, "backend"):
-                return tllm.Executor(engine, tllm.ModelType.DECODER_ONLY,
-                                     executor_config)
-            args = {
-                "executor_config": executor_config,
-                "checkpoint_dir": executor_config.hf_model_dir,
-            }
-            if executor_config.backend == "pytorch":
-                logger.info("hyc: executor_config.backend = pytorch")
-                from tensorrt_llm._torch.pyexecutor.py_executor_creator import \
-                    create_py_executor
-                create_executor = create_py_executor
-                args["lora_config"] = lora_config
-                args[
-                    "garbage_collection_gen0_threshold"] = garbage_collection_gen0_threshold
-            elif executor_config.backend == "_autodeploy":
-                from tensorrt_llm._torch.auto_deploy.shim.ad_executor import \
-                    create_autodeploy_executor
-                create_executor = create_autodeploy_executor
-            else:
-                raise ValueError(
-                    f"Unsupported backend config: {executor_config.backend}")
-            return create_executor(**args)
-
-        logger.info("hyc: call _create_engine() begin")
-
-        # self.engine = _create_engine()
-
-        # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-        # hyc: 更改模型加载逻辑
-        # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
+        # 支持 lazy load 模式
         self.lazy_load = lazy_load
+        self.model_loaded = False
         self.engine = None
         # 之前的 _create_engine() 调用改成：
         if not self.lazy_load:
-            self.engine = _create_engine()  # 你原来放在 __init__ 中的创建行为
-
-            # ------------------------ 下面这部分内容几乎不耗时 -----------------------------------
-
-            self._lora_manager: Optional[LoraManager] = None
-            self._prompt_adapter_manager: Optional[PromptAdapterManager] = None
-            self._runtime_model_config: Optional[ModelConfig] = None
-            if self.rank == 0 and isinstance(self.engine, tllm.Executor):
-                if isinstance(engine, Engine):
-                    engine_config = engine.config
-                else:
-                    engine_config = EngineConfig.from_json_file(
-                        f"{engine}/config.json")
-                self._runtime_model_config = _engine_config_to_model_config(
-                    engine_config)
-                if engine_config.build_config.plugin_config.lora_plugin:
-                    # TODO(azuker): Passing peft cache manager to LoraManager is used for LoRA optimization
-                    # (see LoraManager constructor docstring). Getting the peft cache manager from this
-                    # point in the TRT flow is currently not supported (it's at the CPP
-                    # Executor->ExecutorImpl->TrtGptModel->mPeftCacheManager) therefore for now this LoRA
-                    # optimization is not available in TRT-python flow.
-                    self._lora_manager = LoraManager(cpp_peft_cache_manager=None)
-                if engine_config.build_config.max_prompt_embedding_table_size > 0:
-                    self._prompt_adapter_manager = PromptAdapterManager()
-
-            if getattr(executor_config, "backend",
-                    "") == "pytorch" and lora_config is not None:
-                from tensorrt_llm._torch.pyexecutor.resource_manager import \
-                    ResourceManagerType
-                peft_cache_manager = self.engine.resource_manager.resource_managers.get(
-                    ResourceManagerType.PEFT_CACHE_MANAGER)
-                self._lora_manager = LoraManager(
-                    cpp_peft_cache_manager=peft_cache_manager.impl)
-                lora_model_config = self.engine.model_engine.lora_model_config
-                assert lora_model_config is not None
-                self._lora_model_config = lora_model_config
-
-            self.await_response_thread = ManagedThread(
-                self.await_response_task,
-                error_queue=self._error_queue,
-                name="await_response_thread")
-
-            self.dispatch_stats_thread = ManagedThread(
-                self.dispatch_stats_task,
-                error_queue=self._error_queue,
-                name="dispatch_stats_thread")
-
-            self.dispatch_kv_cache_events_thread = ManagedThread(
-                self.dispatch_kv_cache_events_task,
-                error_queue=self._error_queue,
-                name="dispatch_kv_cache_events_thread")
-
-            logger.info("hyc: GenerationExecutorWorker init end")
-
+            self.engine = self._create_engine(
+                engine=engine,
+                executor_config=executor_config,
+                lora_config=lora_config,
+                garbage_collection_gen0_threshold=garbage_collection_gen0_threshold,
+            )
+            self.model_loaded = True
+            self._post_create_engine(
+                engine=engine,
+                executor_config=executor_config,
+                lora_config=lora_config,
+            )
         else:
+            self.engine = None
+            # 保存配置以便后续加载
+            self._pending_engine_config = {
+                'engine': engine,
+                'executor_config': executor_config,
+                'batched_logits_processor': batched_logits_processor,
+                'lora_config': lora_config,
+                'garbage_collection_gen0_threshold': garbage_collection_gen0_threshold
+            }
             logger.info("GenerationExecutorWorker running in lazy_load mode: engine creation deferred")
 
-            logger.info("hyc: call _create_engine() end")
+    def _create_engine(
+        self,
+        engine: Union[Path, Engine],
+        executor_config: Optional[tllm.ExecutorConfig] = None,
+        lora_config: Optional[LoraConfig] = None,
+        garbage_collection_gen0_threshold: Optional[int] = None,
+    ) -> tllm.Executor:
+        device_id = self.global_rank % torch.cuda.device_count()
+        torch.cuda.set_device(device_id)
 
-        # --------------------------- 下面部分几乎不耗时 --------------------------------------------
+        # Make sure C++ executor would use same devices/ranks as py_executor
+        global_rank = global_mpi_rank()
+        comm_ranks = mpi_comm().allgather(global_rank)
+        device_ids = mpi_comm().allgather(device_id)
+        executor_config.parallel_config = tllm.ParallelConfig(
+            participant_ids=comm_ranks, device_ids=device_ids)
+
+        if isinstance(engine, Engine):
+            return tllm.Executor(engine.engine,
+                                    json.dumps(engine.config.to_dict(),
+                                            cls=ConfigEncoder),
+                                    tllm.ModelType.DECODER_ONLY,
+                                    executor_config=executor_config,
+                                    managed_weights=engine.managed_weights)
+
+        if not hasattr(executor_config, "backend"):
+            return tllm.Executor(engine, tllm.ModelType.DECODER_ONLY,
+                                    executor_config)
+        args = {
+            "executor_config": executor_config,
+            "checkpoint_dir": executor_config.hf_model_dir,
+        }
+        if executor_config.backend == "pytorch":
+            from tensorrt_llm._torch.pyexecutor.py_executor_creator import \
+                create_py_executor
+            create_executor = create_py_executor
+            args["lora_config"] = lora_config
+            args[
+                "garbage_collection_gen0_threshold"] = garbage_collection_gen0_threshold
+        elif executor_config.backend == "_autodeploy":
+            from tensorrt_llm._torch.auto_deploy.shim.ad_executor import \
+                create_autodeploy_executor
+            create_executor = create_autodeploy_executor
+        else:
+            raise ValueError(
+                f"Unsupported backend config: {executor_config.backend}")
+        return create_executor(**args)
+
+    def _post_create_engine(
+        self,
+        engine: Union[Path, Engine],
+        executor_config: Optional[tllm.ExecutorConfig] = None,
+        lora_config: Optional[LoraConfig] = None,
+    ) -> None:
+        self._lora_manager: Optional[LoraManager] = None
+        self._prompt_adapter_manager: Optional[PromptAdapterManager] = None
+        self._runtime_model_config: Optional[ModelConfig] = None
+        if self.rank == 0 and isinstance(self.engine, tllm.Executor):
+            if isinstance(engine, Engine):
+                engine_config = engine.config
+            else:
+                engine_config = EngineConfig.from_json_file(
+                    f"{engine}/config.json")
+            self._runtime_model_config = _engine_config_to_model_config(
+                engine_config)
+            if engine_config.build_config.plugin_config.lora_plugin:
+                # TODO(azuker): Passing peft cache manager to LoraManager is used for LoRA optimization
+                # (see LoraManager constructor docstring). Getting the peft cache manager from this
+                # point in the TRT flow is currently not supported (it's at the CPP
+                # Executor->ExecutorImpl->TrtGptModel->mPeftCacheManager) therefore for now this LoRA
+                # optimization is not available in TRT-python flow.
+                self._lora_manager = LoraManager(cpp_peft_cache_manager=None)
+            if engine_config.build_config.max_prompt_embedding_table_size > 0:
+                self._prompt_adapter_manager = PromptAdapterManager()
+
+        if getattr(executor_config, "backend",
+                "") == "pytorch" and lora_config is not None:
+            from tensorrt_llm._torch.pyexecutor.resource_manager import \
+                ResourceManagerType
+            peft_cache_manager = self.engine.resource_manager.resource_managers.get(
+                ResourceManagerType.PEFT_CACHE_MANAGER)
+            self._lora_manager = LoraManager(
+                cpp_peft_cache_manager=peft_cache_manager.impl)
+            lora_model_config = self.engine.model_engine.lora_model_config
+            assert lora_model_config is not None
+            self._lora_model_config = lora_model_config
+
+        self.await_response_thread = ManagedThread(
+            self.await_response_task,
+            error_queue=self._error_queue,
+            name="await_response_thread")
+
+        self.dispatch_stats_thread = ManagedThread(
+            self.dispatch_stats_task,
+            error_queue=self._error_queue,
+            name="dispatch_stats_thread")
+
+        self.dispatch_kv_cache_events_thread = ManagedThread(
+            self.dispatch_kv_cache_events_task,
+            error_queue=self._error_queue,
+            name="dispatch_kv_cache_events_thread")
+
+    def lazy_load_model(self):
+        """Load model when lazy_load is enabled"""
+        if self.model_loaded:
+            logger.warning("Model already loaded")
+            return
         
-
-        # self._lora_manager: Optional[LoraManager] = None
-        # self._prompt_adapter_manager: Optional[PromptAdapterManager] = None
-        # self._runtime_model_config: Optional[ModelConfig] = None
-        # if self.rank == 0 and isinstance(self.engine, tllm.Executor):
-        #     if isinstance(engine, Engine):
-        #         engine_config = engine.config
-        #     else:
-        #         engine_config = EngineConfig.from_json_file(
-        #             f"{engine}/config.json")
-        #     self._runtime_model_config = _engine_config_to_model_config(
-        #         engine_config)
-        #     if engine_config.build_config.plugin_config.lora_plugin:
-        #         # TODO(azuker): Passing peft cache manager to LoraManager is used for LoRA optimization
-        #         # (see LoraManager constructor docstring). Getting the peft cache manager from this
-        #         # point in the TRT flow is currently not supported (it's at the CPP
-        #         # Executor->ExecutorImpl->TrtGptModel->mPeftCacheManager) therefore for now this LoRA
-        #         # optimization is not available in TRT-python flow.
-        #         self._lora_manager = LoraManager(cpp_peft_cache_manager=None)
-        #     if engine_config.build_config.max_prompt_embedding_table_size > 0:
-        #         self._prompt_adapter_manager = PromptAdapterManager()
-
-        # if getattr(executor_config, "backend",
-        #            "") == "pytorch" and lora_config is not None:
-        #     from tensorrt_llm._torch.pyexecutor.resource_manager import \
-        #         ResourceManagerType
-        #     peft_cache_manager = self.engine.resource_manager.resource_managers.get(
-        #         ResourceManagerType.PEFT_CACHE_MANAGER)
-        #     self._lora_manager = LoraManager(
-        #         cpp_peft_cache_manager=peft_cache_manager.impl)
-        #     lora_model_config = self.engine.model_engine.lora_model_config
-        #     assert lora_model_config is not None
-        #     self._lora_model_config = lora_model_config
-
-        # self.await_response_thread = ManagedThread(
-        #     self.await_response_task,
-        #     error_queue=self._error_queue,
-        #     name="await_response_thread")
-
-        # self.dispatch_stats_thread = ManagedThread(
-        #     self.dispatch_stats_task,
-        #     error_queue=self._error_queue,
-        #     name="dispatch_stats_thread")
-
-        # self.dispatch_kv_cache_events_thread = ManagedThread(
-        #     self.dispatch_kv_cache_events_task,
-        #     error_queue=self._error_queue,
-        #     name="dispatch_kv_cache_events_thread")
-
-        # logger.info("hyc: GenerationExecutorWorker init end")
-
+        if not self.lazy_load:
+            raise RuntimeError("lazy_load_model can only be called in lazy_load mode")
+        
+        # 执行实际的模型加载
+        config = self._pending_engine_config
+        self.engine = self._create_engine(
+            engine=config['engine'],
+            executor_config=config['executor_config'],
+            lora_config=config['lora_config'],
+            garbage_collection_gen0_threshold=config['garbage_collection_gen0_threshold'],
+        )
+        self.model_loaded = True
+        self._post_create_engine(
+            engine=config['engine'],
+            executor_config=config['executor_config'],
+            lora_config=config['lora_config'],
+        )
 
     def set_result_queue(self, queue):
         """In multi-gpu mode, result_queue will be set here to communicate between the proxy and the worker 0 process."""
@@ -754,6 +727,7 @@ def worker_main(
         bool] = True,  # whether it's the main executor instance
     lora_config: Optional[LoraConfig] = None,
     garbage_collection_gen0_threshold: Optional[int] = None,
+    lazy_load: bool = False,
 ) -> None:
     mpi_comm().barrier()
     print_colored_debug(f"Worker {mpi_rank()} entering worker_main...\n",
@@ -770,7 +744,8 @@ def worker_main(
 
     result_queue: Optional[IpcQueue] = None
     result_queues: Optional[List[IpcQueue]] = None
-    load_stats_queue: Optional[FusedIpcQueue] = None
+    load_stats_queue: Optional[IpcQueue] = None
+    control_queue: Optional[IpcQueue] = None
 
     postproc_worker_config = postproc_worker_config or PostprocWorkerConfig()
 
@@ -811,6 +786,11 @@ def worker_main(
             is_server=False,
             fuse_message=False,
             name="worker_kv_cache_events_queue")
+        if lazy_load:
+            control_queue = IpcQueue(
+                worker_queues.control_queue_addr,
+                is_server=False,
+                name="worker_control_queue")
 
         if postproc_worker_config.enabled:
             # IPC queues for sending inputs to the postprocess parallel
@@ -829,14 +809,6 @@ def worker_main(
                                          fuse_message=False,
                                          name="worker_result_queue")
 
-    # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-    # hyc: 先创建 control_queue 客户端（所有 ranks 都创建以便接收消息）
-    # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-    # 在 worker_main 里，创建 control_queue 客户端（所有 ranks）
-    control_queue = None
-    if worker_queues.control_queue_addr is not None:
-        control_queue = IpcQueue(worker_queues.control_queue_addr, is_server=False, name="worker_control_queue")
-
     # 在 leader 分支里，原来在完成 queue 初始化后（但在模型构建之前）：
     if is_leader:
         try:
@@ -844,29 +816,6 @@ def worker_main(
             worker_init_status_queue.put(("PAUSED_NO_MODEL", None))
         except Exception as e:
             logger.warning(f"Failed to send PAUSED_NO_MODEL: {e}")
-
-    # 如果 control_queue 存在，则在此处阻塞等待 LOAD_MODEL 控制消息
-    if control_queue is not None:
-        logger.info(f"Worker {mpi_rank()} waiting for LOAD_MODEL control signal")
-        while True:
-            if control_queue.poll(1.0):
-                try:
-                    msg = control_queue.get()
-                except Exception:
-                    continue
-                if isinstance(msg, dict) and msg.get("cmd") == "LOAD_MODEL":
-                    logger.info(f"Worker {mpi_rank()} received LOAD_MODEL, proceeding to load engine")
-                    break
-                else:
-                    # 支持其他 control 命令（如 CANCEL/STATUS）可在此处理
-                    logger.debug(f"Worker {mpi_rank()} got control message: {msg}")
-            # 也可以检查退出条件，例如 background error queue 等
-
-    # 同步所有 rank，再开始加载
-    mpi_comm().barrier()
-    # 下面把原来放模型加载、engine 创建的代码放到这里
-    # 例如：worker = worker_cls(..., lazy_load=True)  -> 然后调用 worker.load_engine()
-
 
     def notify_proxy_threads_to_quit():
         # Signal the dispatcher thread in the proxy to quit
@@ -924,7 +873,9 @@ def worker_main(
             postproc_worker_config=postproc_worker_config,
             is_llm_executor=is_llm_executor,
             lora_config=lora_config,
-            garbage_collection_gen0_threshold=garbage_collection_gen0_threshold)
+            garbage_collection_gen0_threshold=garbage_collection_gen0_threshold,
+            lazy_load=lazy_load,
+        )
     except Exception as e:
         logger.error(f"Failed to initialize executor on rank {mpi_rank()}: {e}")
         logger.error(traceback.format_exc())
@@ -932,6 +883,21 @@ def worker_main(
         if is_leader:
             worker_init_status_queue.put((e, traceback.format_exc()))
         return
+    
+    # 如果 control_queue 存在，则在此处阻塞等待 LOAD_MODEL 控制消息
+    if control_queue is not None:
+        logger.info(f"Worker {mpi_rank()} waiting for LOAD_MODEL control signal")
+        while (req := control_queue.get()) is not None:
+            if isinstance(req, LazyLoadRequest):
+                logger.info(f"Worker {mpi_rank()} received LazyLoadRequest, proceeding to load model")
+                worker.lazy_load_model()
+                break
+            else:
+                print(req)
+                raise ValueError(f"Unknown request type: {type(req)}")
+
+    # 同步所有 rank，再开始加载
+    mpi_comm().barrier()
 
     with worker:
         try:

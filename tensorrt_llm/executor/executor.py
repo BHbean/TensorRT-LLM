@@ -79,7 +79,6 @@ class GenerationExecutor(ABC):
                  num_postprocess_workers: int = 0,
                  postprocess_tokenizer_dir: Optional[str] = None,
                  is_llm_executor: Optional[bool] = None):
-        logger.info("hyc: GenerationExecutor init begin")
         
         self.postproc_config = PostprocWorkerConfig(
             num_postprocess_workers=num_postprocess_workers,
@@ -102,8 +101,6 @@ class GenerationExecutor(ABC):
         self._is_llm_executor = is_llm_executor
         self._iter_kv_events_result: IterationResult | None = None
         self._iter_stats_result: IterationResult | None = None
-
-        logger.info("hyc: GenerationExecutor init end")
 
     @abstractmethod
     def submit(self, request: GenerationRequest) -> GenerationResult:
@@ -359,9 +356,9 @@ class GenerationExecutor(ABC):
         is_llm_executor: Optional[bool] = None,
         lora_config: Optional[LoraConfig] = None,
         garbage_collection_gen0_threshold: Optional[int] = None,
+        lazy_load: bool = False,
     ) -> Union["GenerationExecutorProxy", "GenerationExecutorWorker"]:
 
-        logger.info("hyc: GenerationExecutor's create function begin")
         # local imports to avoid cyclic importing
         from .proxy import GenerationExecutorProxy
         from .worker import GenerationExecutorWorker
@@ -406,7 +403,8 @@ class GenerationExecutor(ABC):
                 postproc_worker_config=postproc_worker_config,
                 is_llm_executor=is_llm_executor,
                 garbage_collection_gen0_threshold=
-                garbage_collection_gen0_threshold)
+                garbage_collection_gen0_threshold,
+                lazy_load=lazy_load)
 
         # WAR: For the performance of gathering logits, we use single process worker
         # for TP1 to avoid the large overhead of IPC.
@@ -425,7 +423,6 @@ class GenerationExecutor(ABC):
         # While this requires uses to protect their entrypoint to
         # `if __name__ == "__main__":`.
         if not platform.system() == 'Windows':
-            logger.info("hyc: enter Windows")
             return GenerationExecutorProxy(
                 worker_kwargs,
                 model_world_size=model_world_size,
@@ -433,7 +430,8 @@ class GenerationExecutor(ABC):
                 postproc_worker_config=postproc_worker_config,
                 is_llm_executor=is_llm_executor,
                 garbage_collection_gen0_threshold=
-                garbage_collection_gen0_threshold)
+                garbage_collection_gen0_threshold,
+                lazy_load=lazy_load)
         else:
             ctx = multiprocessing.get_context("spawn")
             # The ProcessPoolExecutorSession is used to support Windows, as mpi4py cannot.
@@ -446,9 +444,8 @@ class GenerationExecutor(ABC):
                 postproc_worker_config=postproc_worker_config,
                 is_llm_executor=is_llm_executor,
                 garbage_collection_gen0_threshold=
-                garbage_collection_gen0_threshold)
-
-        logger.info("hyc: GenerationExecutor's create function end")
+                garbage_collection_gen0_threshold,
+                lazy_load=lazy_load)
 
     def wait_first_completed(
         self, futures: List[GenerationResult]

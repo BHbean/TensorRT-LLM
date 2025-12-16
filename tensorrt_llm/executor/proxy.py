@@ -23,7 +23,7 @@ from ..llmapi.utils import (AsyncQueue, ManagedThread, _SyncQueue,
 from .executor import GenerationExecutor
 from .ipc import FusedIpcQueue, IpcQueue
 from .postproc_worker import PostprocWorkerConfig
-from .request import CancellingRequest, GenerationRequest, LoadStatsRequest
+from .request import CancellingRequest, GenerationRequest, LoadStatsRequest, LazyLoadRequest
 from .result import GenerationResult, IterationResult
 from .utils import (ErrorResponse, IntraProcessQueue, WorkerCommIpcAddrs,
                     create_mpi_comm_session, get_spawn_proxy_process_env,
@@ -37,10 +37,6 @@ __all__ = [
 
 class GenerationExecutorProxy(GenerationExecutor):
     READY_SIGNAL = b"READY"
-
-    # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-    # hyc: 新增加的协议常量，用于 lazy_load 模式
-    # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
     PAUSED_SIGNAL = b"PAUSED_NO_MODEL"
 
     def __init__(
@@ -53,8 +49,8 @@ class GenerationExecutorProxy(GenerationExecutor):
         postproc_worker_config: Optional[PostprocWorkerConfig] = None,
         is_llm_executor: Optional[bool] = None,
         garbage_collection_gen0_threshold: Optional[int] = None,
+        lazy_load: bool = False,
     ) -> None:
-        logger.info("hyc: GenerationExecutorProxy init begin")
         postproc_worker_config = postproc_worker_config or PostprocWorkerConfig(
         )
         super().__init__(
@@ -78,15 +74,12 @@ class GenerationExecutorProxy(GenerationExecutor):
             if mpi_process_pre_spawned:
                 print_colored_debug('create comm session ...\n', "yellow")
                 self.mpi_session = create_mpi_comm_session(model_world_size)
-                logger.info("hyc: mpi_session = create_mpi_comm_session(model_world_size)")
             else:
                 print_colored_debug('create pool session ...\n', "yellow")
                 self.mpi_session = MpiPoolSession(n_workers=model_world_size)
-                logger.info("hyc: mpi_session = MpiPoolSession(n_workers=model_world_size)")
         else:
             print_colored_debug('using external mpi session ...\n', "yellow")
             self.mpi_session = mpi_session
-            logger.info("hyc: self.mpi_session = mpi_session")
 
         if isinstance(self.mpi_session,
                       (MpiCommSession, RemoteMpiCommSessionClient)):
@@ -104,12 +97,15 @@ class GenerationExecutorProxy(GenerationExecutor):
 
         self.garbage_collection_gen0_threshold = garbage_collection_gen0_threshold
 
+        self.lazy_load = lazy_load
+
         worker_kwargs = dict(**worker_kwargs,
                              worker_queues=self._setup_queues(),
                              postproc_worker_config=postproc_worker_config,
                              is_llm_executor=False,
                              garbage_collection_gen0_threshold=self.
-                             garbage_collection_gen0_threshold)
+                             garbage_collection_gen0_threshold,
+                             lazy_load=lazy_load,)
 
         if "log_level" not in worker_kwargs:
             worker_kwargs["log_level"] = logger.level
@@ -117,7 +113,6 @@ class GenerationExecutorProxy(GenerationExecutor):
         self.dispatch_result_thread: Optional[ManagedThread] = None
         self.dispatch_stats_thread: Optional[ManagedThread] = None
         self.dispatch_kv_cache_events_thread: Optional[ManagedThread] = None
-        logger.info("hyc: call function: _start_executor_workers")
         self._start_executor_workers(worker_kwargs)
 
         # MPI registers its joiner using threading._register_atexit if possible.
@@ -129,13 +124,7 @@ class GenerationExecutorProxy(GenerationExecutor):
         except AttributeError:
             atexit.register(self.pre_shutdown)
 
-        logger.info("hyc: GenerationExecutorProxy init end")
-
-    # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-    # hyc: 对函数 _setup_queues() 进行修改，原函数前缀加hyc
-    # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-    def hyc_setup_queues(self) -> WorkerCommIpcAddrs:
-
+    def _setup_queues(self) -> WorkerCommIpcAddrs:
         self.request_queue = IpcQueue(is_server=True,
                                       name="proxy_request_queue")
         self.worker_init_status_queue = IpcQueue(
@@ -148,10 +137,12 @@ class GenerationExecutorProxy(GenerationExecutor):
             fuse_message=False,
             socket_type=zmq.PULL
             if self.enable_postprocess_parallel else zmq.PAIR,
-            name="proxy_result_queue")
-        self.mp_stats_queue = FusedIpcQueue(is_server=True,
-                                            fuse_message=False,
-                                            name="proxy_stats_queue")
+            name="proxy_result_queue"
+        )
+        self.mp_stats_queue = FusedIpcQueue(
+            is_server=True,
+            fuse_message=False,
+            name="proxy_stats_queue")
         self.load_stats_queue = FusedIpcQueue(
             is_server=True,
             fuse_message=False,
@@ -160,6 +151,14 @@ class GenerationExecutorProxy(GenerationExecutor):
             is_server=True,
             fuse_message=False,
             name="proxy_kv_cache_events_queue")
+
+        # 新增 control queue，用于 proxy -> worker 控制指令（例如 LOAD_MODEL）
+        # 使用 IpcQueue server 端，worker 端以 client 方式连接（is_server=False）
+        if self.lazy_load:
+            self.control_queue = IpcQueue(
+                is_server=True,
+                name="proxy_control_queue")
+
         return WorkerCommIpcAddrs(
             request_queue_addr=self.request_queue.address,
             worker_init_status_queue_addr=self.worker_init_status_queue.address,
@@ -167,33 +166,8 @@ class GenerationExecutorProxy(GenerationExecutor):
             stats_queue_addr=self.mp_stats_queue.address,
             load_stats_queue_addr=self.load_stats_queue.address,
             kv_cache_events_queue_addr=self.kv_cache_events_queue.address,
+            control_queue_addr=self.control_queue.address if self.lazy_load else None,
         )
-
-    def _setup_queues(self) -> WorkerCommIpcAddrs:
-        self.request_queue = IpcQueue(is_server=True, name="proxy_request_queue")
-        self.worker_init_status_queue = IpcQueue(is_server=True, name="worker_init_status_queue")
-        self.result_queue = FusedIpcQueue(
-            is_server=True,
-            fuse_message=False,
-            socket_type=zmq.PULL if self.enable_postprocess_parallel else zmq.PAIR,
-            name="proxy_result_queue"
-        )
-        self.mp_stats_queue = FusedIpcQueue(is_server=True, fuse_message=False, name="proxy_stats_queue")
-        self.kv_cache_events_queue = FusedIpcQueue(is_server=True, fuse_message=False, name="proxy_kv_cache_events_queue")
-
-        # 新增 control queue，用于 proxy -> worker 控制指令（例如 LOAD_MODEL）
-        # 使用 IpcQueue server 端，worker 端以 client 方式连接（is_server=False）
-        self.control_queue = IpcQueue(is_server=True, name="proxy_control_queue")
-
-        return WorkerCommIpcAddrs(
-            request_queue_addr=self.request_queue.address,
-            worker_init_status_queue_addr=self.worker_init_status_queue.address,
-            result_queue_addr=self.result_queue.address,
-            stats_queue_addr=self.mp_stats_queue.address,
-            kv_cache_events_queue_addr=self.kv_cache_events_queue.address,
-            control_queue_addr=self.control_queue.address,
-        )
-
 
     def abort_request(self, request_id: int) -> None:
         ''' Abort a request by sending a cancelling request to the request queue.
@@ -341,18 +315,14 @@ class GenerationExecutorProxy(GenerationExecutor):
 
     def _start_executor_workers(self, worker_kwargs):
 
-        logger.info("hyc: _start_executor_workers() begin")
-
         self_ref = weakref.ref(self)
 
         def mpi_done_callback(future: concurrent.futures.Future):
             # This is called when the MPI worker is done, so future.exception()
             # will not block.
-            logger.info("hyc: mpi_done_callback() begin")
             if future.exception() is not None:
                 if self_ := self_ref():
                     self_._error_queue.put_nowait(future.exception())
-            logger.info("hyc: mpi_done_callback() end")
 
         tracer_init_kwargs = get_tracer().init_kwargs if enable_llm_tracer(
         ) else None
@@ -370,33 +340,8 @@ class GenerationExecutorProxy(GenerationExecutor):
         for fut in self.mpi_futures:
             fut.add_done_callback(mpi_done_callback)
 
-        logger.info("hyc: will set workers_started True")
-
         self.workers_started = True
 
-        # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-        # hyc: 这段让 proxy 在 worker 报告 PAUSED_NO_MODEL 时继续，但标记模型尚未加载。
-        # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-
-
-        # while True:
-        #     if self.worker_init_status_queue.poll(1):
-        #         ready_signal, error_trace = self.worker_init_status_queue.get()
-        #         break
-        #     if any(fut.done() for fut in self.mpi_futures):
-        #         logger.error("Executor worker died during initialization.")
-        #         raise RuntimeError("Executor worker died during initialization")
-        #     self._handle_background_error()
-
-        # logger.info("hyc: exit the while loop")
-
-        # if ready_signal != GenerationExecutorProxy.READY_SIGNAL:
-        #     logger.error(f"Executor worker initialization error: {error_trace}")
-        #     self.mpi_session.shutdown_abort(reason=ready_signal)
-        #     raise RuntimeError(
-        #         "Executor worker returned error") from ready_signal
-
-        # 等待 worker 初始化状态（旧逻辑改为接受 PAUSED_NO_MODEL）
         while True:
             if self.worker_init_status_queue.poll(1):
                 ready_signal, error_trace = self.worker_init_status_queue.get()
@@ -418,12 +363,6 @@ class GenerationExecutorProxy(GenerationExecutor):
             self.mpi_session.shutdown_abort(reason=ready_signal)
             raise RuntimeError("Executor worker returned error") from ready_signal
 
-
-        logger.info("hyc: _start_executor_workers() end")
-
-    # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-    # hyc: 新增方法
-    # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
     def trigger_model_load(self, timeout: Optional[float] = None):
         """
         Send LOAD_MODEL control command to all workers (by posting model_world_size messages),
@@ -437,11 +376,8 @@ class GenerationExecutorProxy(GenerationExecutor):
         if not hasattr(self, "control_queue") or self.control_queue is None:
             raise RuntimeError("Control queue is not available to trigger model load.")
 
-        # Broadcast strategy: post N messages so each worker can receive one (IpcQueue typically distributes messages)
-        n = self.model_world_size or 1
-        load_msg = {"cmd": "LOAD_MODEL"}
-        for i in range(n):
-            self.control_queue.put(load_msg)
+        # FIXME: The signal should not be broadcasted, we should activate only the needed workers.
+        self.control_queue.put(LazyLoadRequest())
 
         logger.info("Sent LOAD_MODEL to workers, waiting for READY...")
 
@@ -467,7 +403,6 @@ class GenerationExecutorProxy(GenerationExecutor):
                 raise RuntimeError("Executor worker died during model loading")
 
             self._handle_background_error()
-
 
     def _abort_all_requests(self):
         # The results can be finished during this loop, so self._results may be changed.
@@ -529,6 +464,10 @@ class GenerationExecutorProxy(GenerationExecutor):
         self.result_queue.close()
         self.mp_stats_queue.close()
         self.kv_cache_events_queue.close()
+        
+        # Close control_queue if it exists (lazy_load mode)
+        if hasattr(self, 'control_queue') and self.control_queue is not None:
+            self.control_queue.close()
 
         self.workers_started = False
         self.mpi_session.shutdown()
@@ -545,10 +484,7 @@ class GenerationExecutorProxy(GenerationExecutor):
             which can be waited.
             Forwards the request to the workers through the request queue.
         """
-        # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-        # hyc: 加入模型未加载检查
-        # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-        # 在 submit() 开头加入：
+        # 加入模型未加载检查
         if not getattr(self, "model_loaded", True):
             # 如果未加载模型，拒绝请求（你也可以返回更友好的异常或 HTTP 状态）
             raise RuntimeError("Model not loaded yet. Call trigger_model_load() first.")

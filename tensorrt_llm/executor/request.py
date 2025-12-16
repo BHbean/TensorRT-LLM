@@ -141,3 +141,10 @@ class LoadStatsRequest:
     
     def __init__(self):
         pass
+
+
+class LazyLoadRequest:
+    ''' Request to trigger lazy model loading '''
+    
+    def __init__(self):
+        pass

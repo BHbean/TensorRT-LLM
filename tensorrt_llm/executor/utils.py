@@ -145,10 +145,6 @@ class WorkerCommIpcAddrs(NamedTuple):
     stats_queue_addr: tuple[str, Optional[bytes]]
     load_stats_queue_addr: tuple[str, Optional[bytes]]
     kv_cache_events_queue_addr: tuple[str, Optional[bytes]]
-
-    # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-    # hyc: 新增 control queue 地址 (proxy -> worker 控制通道)
-    # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
     control_queue_addr: Optional[tuple[str, Optional[bytes]]] = None
 
 
