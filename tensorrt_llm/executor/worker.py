@@ -14,8 +14,8 @@ import torch
 
 from tensorrt_llm.logger import logger
 
-from .._utils import (KVCacheEventSerializer, global_mpi_rank, global_mpi_size,
-                      mpi_comm, mpi_rank, nvtx_range_debug)
+from .._utils import (Intracomm, KVCacheEventSerializer, global_mpi_rank, global_mpi_size,
+                      mpi_comm, mpi_rank, nvtx_range_debug, sub_local_mpi_comm)
 from ..bindings import executor as tllm
 from ..builder import ConfigEncoder, Engine, EngineConfig
 from ..llmapi.llm_args import PybindMirror
@@ -34,7 +34,8 @@ from .ipc import FusedIpcQueue, IpcQueue
 from .postproc_worker import (PostprocParams, PostprocWorker,
                               PostprocWorkerConfig, postproc_worker_main)
 from .request import (CancellingRequest, GenerationRequest, LoadStatsRequest,
-                      LoRARequest, PromptAdapterRequest, LazyLoadRequest)
+                      LoRARequest, PromptAdapterRequest, LoadModelRequest,
+                      UnloadModelRequest)
 from .result import (GenerationResult, IterationResult, LogProbsResult,
                      ResponseWrapper, compute_logprobs)
 from .utils import (ErrorResponse, IntraProcessQueue, RequestError,
@@ -59,7 +60,7 @@ class GenerationExecutorWorker(GenerationExecutor):
         is_llm_executor: Optional[bool] = None,
         lora_config: Optional[LoraConfig] = None,
         garbage_collection_gen0_threshold: Optional[int] = None,
-        lazy_load: bool = True,  # 
+        lazy_load: bool = False,  # Lazy load mode
     ) -> None:
 
         # ==================================================================
@@ -141,14 +142,19 @@ class GenerationExecutorWorker(GenerationExecutor):
         executor_config: Optional[tllm.ExecutorConfig] = None,
         lora_config: Optional[LoraConfig] = None,
         garbage_collection_gen0_threshold: Optional[int] = None,
+        sub_comm: Optional[Intracomm] = None,
     ) -> tllm.Executor:
         device_id = self.global_rank % torch.cuda.device_count()
         torch.cuda.set_device(device_id)
 
         # Make sure C++ executor would use same devices/ranks as py_executor
-        global_rank = global_mpi_rank()
-        comm_ranks = mpi_comm().allgather(global_rank)
-        device_ids = mpi_comm().allgather(device_id)
+        if sub_comm is not None:
+            comm_ranks = sub_comm.allgather(self.global_rank)
+            device_ids = sub_comm.allgather(device_id)
+        else:
+            global_rank = global_mpi_rank()
+            comm_ranks = mpi_comm().allgather(global_rank)
+            device_ids = mpi_comm().allgather(device_id)
         executor_config.parallel_config = tllm.ParallelConfig(
             participant_ids=comm_ranks, device_ids=device_ids)
 
@@ -237,7 +243,14 @@ class GenerationExecutorWorker(GenerationExecutor):
             error_queue=self._error_queue,
             name="dispatch_kv_cache_events_thread")
 
-    def lazy_load_model(self):
+    def load_model(
+        self,
+        model_name: str,
+        engine_dir: Union[str, Path],
+        tp_size: int = 1,
+        pp_size: int = 1,
+        sub_comm: Intracomm = None,
+    ) -> None:
         """Load model when lazy_load is enabled"""
         if self.model_loaded:
             logger.warning("Model already loaded")
@@ -248,11 +261,19 @@ class GenerationExecutorWorker(GenerationExecutor):
         
         # 执行实际的模型加载
         config = self._pending_engine_config
+        # 确保 engine_dir 是 Path 对象
+        if isinstance(engine_dir, str):
+            engine_dir = Path(engine_dir)
+        config['engine'] = engine_dir
+        config['executor_config'].llm_parallel_config.tp_size = tp_size
+        config['executor_config'].llm_parallel_config.pp_size = pp_size
+        self._executor_config = config['executor_config']
         self.engine = self._create_engine(
             engine=config['engine'],
             executor_config=config['executor_config'],
             lora_config=config['lora_config'],
             garbage_collection_gen0_threshold=config['garbage_collection_gen0_threshold'],
+            sub_comm=sub_comm,
         )
         self.model_loaded = True
         self._post_create_engine(
@@ -684,8 +705,13 @@ class GenerationExecutorWorker(GenerationExecutor):
                 self._executor_config.checkpoint_loader.cleanup()
                 self._executor_config.checkpoint_loader = None
 
+        # Set model_loaded to False
+        self.model_loaded = False 
+
         # Check if there are any errors from the threads before shutdown.
         self._handle_background_error()
+
+        self.doing_shutdown = False
 
         print_colored_debug(f"Worker {mpi_rank()} shutdown done.\n", "yellow")
 
@@ -723,6 +749,7 @@ def worker_main(
     _torch_model_class_mapping: Optional[dict] = None,
     postproc_worker_config: Optional[PostprocWorkerConfig] = None,
     ready_signal: Optional[str] = None,
+    pause_signal: Optional[str] = None,
     is_llm_executor: Optional[
         bool] = True,  # whether it's the main executor instance
     lora_config: Optional[LoraConfig] = None,
@@ -786,11 +813,6 @@ def worker_main(
             is_server=False,
             fuse_message=False,
             name="worker_kv_cache_events_queue")
-        if lazy_load:
-            control_queue = IpcQueue(
-                worker_queues.control_queue_addr,
-                is_server=False,
-                name="worker_control_queue")
 
         if postproc_worker_config.enabled:
             # IPC queues for sending inputs to the postprocess parallel
@@ -808,14 +830,12 @@ def worker_main(
                                          is_server=False,
                                          fuse_message=False,
                                          name="worker_result_queue")
-
-    # 在 leader 分支里，原来在完成 queue 初始化后（但在模型构建之前）：
-    if is_leader:
-        try:
-            # 发送 paused 状态，表明 worker 已启动但尚未加载模型
-            worker_init_status_queue.put(("PAUSED_NO_MODEL", None))
-        except Exception as e:
-            logger.warning(f"Failed to send PAUSED_NO_MODEL: {e}")
+    # If lazy_load is enabled, all workers need to create control_queue to receive LOAD_MODEL signal
+    if lazy_load:
+        control_queue = IpcQueue(
+            worker_queues.control_queue_addrs[mpi_rank()],
+            is_server=False,
+            name=f"worker_control_queue_{mpi_rank()}")
 
     def notify_proxy_threads_to_quit():
         # Signal the dispatcher thread in the proxy to quit
@@ -828,6 +848,7 @@ def worker_main(
         # Signal the stats thread in the proxy to quit
         mp_stats_queue.put(None)
         kv_cache_events_queue.put(None)
+        load_stats_queue.put(None)
 
     postprocess_worker_futures = []
     if is_leader and postproc_worker_config.enabled:
@@ -884,72 +905,122 @@ def worker_main(
             worker_init_status_queue.put((e, traceback.format_exc()))
         return
     
-    # 如果 control_queue 存在，则在此处阻塞等待 LOAD_MODEL 控制消息
-    if control_queue is not None:
-        logger.info(f"Worker {mpi_rank()} waiting for LOAD_MODEL control signal")
-        while (req := control_queue.get()) is not None:
-            if isinstance(req, LazyLoadRequest):
-                logger.info(f"Worker {mpi_rank()} received LazyLoadRequest, proceeding to load model")
-                worker.lazy_load_model()
-                break
-            else:
-                print(req)
-                raise ValueError(f"Unknown request type: {type(req)}")
+    # Put pause signal in the queue when in lazy load mode
+    if lazy_load and is_leader:
+        worker_init_status_queue.put((pause_signal, None))
 
-    # 同步所有 rank，再开始加载
-    mpi_comm().barrier()
-
-    with worker:
-        try:
-            worker.block_subordinates()
-
-            if is_leader:
-                if postproc_worker_config.enabled:
-                    worker.set_postproc_queues(result_queues)
+    # Use this var to control whether to reload new models
+    wait_for_model_loading = True
+    is_it_result_queue_set = False
+    while wait_for_model_loading:
+        # 如果 control_queue 存在，则在此处阻塞等待 LOAD_MODEL 控制消息
+        load_model_req = None
+        sub_comm = None
+        if control_queue is not None:
+            logger.info(f"Worker {mpi_rank()} waiting for LOAD_MODEL or SHUTDOWN control signal")
+            while (req := control_queue.get()) is not None:
+                if isinstance(req, LoadModelRequest):
+                    logger.info(f"Worker {mpi_rank()} received LoadModelRequest, proceeding to load model")
+                    load_model_req = req
+                    sub_comm = sub_local_mpi_comm(load_model_req.worker_ranks)
+                    break
                 else:
-                    worker.set_result_queue(result_queue)
+                    logger.warning(f"Worker {mpi_rank()} received unknown request type: {type(req)}")
+                    raise ValueError(f"Unknown request type: {type(req)}")
+            
+            if req is None:
+                logger.info(f"Worker {mpi_rank()} received shutdown signal")
+                if is_leader:
+                    notify_proxy_threads_to_quit()
+                mpi_comm().barrier()
+                break
+        
+        # Barrier for all workers in the sub-communicator to sync before model loading
+        if sub_comm is not None:
+            sub_comm.Barrier()
 
-                # initialize the iteration result queues
-                worker._set_iteration_result_queue(worker.stats_queues,
-                                                   mp_stats_queue)
-                worker._set_iteration_result_queue(worker.kv_events_queues,
-                                                   kv_cache_events_queue)
-                worker_init_status_queue.put((ready_signal, None))
-                while (req := request_queue.get()) is not None:
-                    if isinstance(req, CancellingRequest):
-                        worker.abort_request(req.id)
-                    elif isinstance(req, LoadStatsRequest):
-                        # Handle load stats request - use dedicated stats queue
-                        try:
-                            load_stats = worker.get_current_load_stats()
-                            # Send load stats through dedicated stats queue
-                            load_stats_queue.put(load_stats.to_json_str())
-                        except Exception as e:
-                            logger.error(f"get_current_load_stats failed: {e}")
-                            # Send error through stats queue as well
-                            load_stats_queue.put(None)
-                    elif isinstance(req, GenerationRequest):
-                        try:
-                            worker.submit(req)
-                        except RequestError as e:
-                            logger.error(f"submit request failed: {e}")
-                            worker._await_response_helper.temp_error_responses.put(
-                                ErrorResponse(req.id, e, req.id))
+        if load_model_req is not None and global_mpi_rank() in load_model_req.worker_ranks:
+            worker.load_model(
+                model_name=load_model_req.model_name,
+                engine_dir=load_model_req.engine_dir,
+                tp_size=load_model_req.tp_size,
+                pp_size=load_model_req.pp_size,
+                sub_comm=sub_comm,
+            )
+            print_colored_debug(f"Worker {mpi_rank()} finished loading model.\n",
+                                "green")
+
+        with worker:
+            try:
+                worker.block_subordinates()
+
+                if is_leader:
+                    if postproc_worker_config.enabled:
+                        worker.set_postproc_queues(result_queues)
                     else:
-                        raise ValueError(f"Unknown request type: {type(req)}")
+                        worker.set_result_queue(result_queue)
 
-                notify_proxy_threads_to_quit()
+                    # initialize the iteration result queues
+                    if not is_it_result_queue_set:
+                        worker._set_iteration_result_queue(worker.stats_queues,
+                                                        mp_stats_queue)
+                        worker._set_iteration_result_queue(worker.kv_events_queues,
+                                                        kv_cache_events_queue)
+                        is_it_result_queue_set = True
+                    worker_init_status_queue.put((ready_signal, None))
+                    while (req := request_queue.get()) is not None:
+                        if isinstance(req, CancellingRequest):
+                            worker.abort_request(req.id)
+                        elif isinstance(req, LoadStatsRequest):
+                            # Handle load stats request - use dedicated stats queue
+                            try:
+                                load_stats = worker.get_current_load_stats()
+                                # Send load stats through dedicated stats queue
+                                load_stats_queue.put(load_stats.to_json_str())
+                            except Exception as e:
+                                logger.error(f"get_current_load_stats failed: {e}")
+                                # Send error through stats queue as well
+                                load_stats_queue.put(None)
+                        elif isinstance(req, GenerationRequest):
+                            try:
+                                worker.submit(req)
+                            except RequestError as e:
+                                logger.error(f"submit request failed: {e}")
+                                worker._await_response_helper.temp_error_responses.put(
+                                    ErrorResponse(req.id, e, req.id))
+                        elif isinstance(req, UnloadModelRequest):
+                            logger.info(f"Worker {mpi_rank()} received UnloadModelRequest to unload model, will wait for next LoadModelRequest")
+                            if not lazy_load:
+                                logger.warning("UnloadModelRequest ignored in non-lazy_load mode")
+                                continue
+                            worker.shutdown()
+                            wait_for_model_loading = True
+                            worker_init_status_queue.put((pause_signal, None))
+                            break
+                        else:
+                            raise ValueError(f"Unknown request type: {type(req)}")
 
-        except GenerationExecutorWorker.WorkerExit as e:
-            # This will capture by the with-statement and exit normally.
-            raise e
+            except GenerationExecutorWorker.WorkerExit as e:
+                # This will capture by the with-statement and exit normally.
+                raise e
 
-        except Exception as e:  # other critical errors
-            if is_leader:
-                notify_proxy_threads_to_quit()
-            logger.error(traceback.format_exc())
-            # This will be captured by mpi4py and handled by future.done_callback
-            raise e
+            except Exception as e:  # other critical errors
+                if is_leader:
+                    notify_proxy_threads_to_quit()
+                logger.error(traceback.format_exc())
+                # This will be captured by mpi4py and handled by future.done_callback
+                raise e
+        
+        # Exit the outer loop
+        if not lazy_load:
+            wait_for_model_loading = False
+        
+        if sub_comm is not None:
+            # wait_for_model_loading = sub_comm.bcast(wait_for_model_loading, root=0)
+            sub_comm.Barrier()
+            sub_comm.Free()
+            # Must set sub_comm to None to avoid double free when object is GCed
+            sub_comm = None
 
 
 class AwaitResponseHelper:

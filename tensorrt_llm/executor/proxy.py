@@ -2,10 +2,12 @@ import atexit
 import concurrent.futures
 import threading
 import time
+import traceback
 import weakref
 from typing import Dict, Optional, Union
 import asyncio
 import json
+from pathlib import Path
 
 import torch
 import zmq
@@ -23,7 +25,8 @@ from ..llmapi.utils import (AsyncQueue, ManagedThread, _SyncQueue,
 from .executor import GenerationExecutor
 from .ipc import FusedIpcQueue, IpcQueue
 from .postproc_worker import PostprocWorkerConfig
-from .request import CancellingRequest, GenerationRequest, LoadStatsRequest, LazyLoadRequest
+from .request import (CancellingRequest, GenerationRequest, LoadStatsRequest,
+                      LoadModelRequest, UnloadModelRequest)
 from .result import GenerationResult, IterationResult
 from .utils import (ErrorResponse, IntraProcessQueue, WorkerCommIpcAddrs,
                     create_mpi_comm_session, get_spawn_proxy_process_env,
@@ -50,7 +53,14 @@ class GenerationExecutorProxy(GenerationExecutor):
         is_llm_executor: Optional[bool] = None,
         garbage_collection_gen0_threshold: Optional[int] = None,
         lazy_load: bool = False,
+        max_num_workers: Optional[int] = None,
     ) -> None:
+        # Check parameters: max_num_workers should be provided only when lazy_load is True
+        if lazy_load:
+            assert max_num_workers is not None, "max_num_workers must be provided when lazy_load is True."
+        else:
+            assert max_num_workers is None, "max_num_workers should not be provided when lazy_load is False."
+
         postproc_worker_config = postproc_worker_config or PostprocWorkerConfig(
         )
         super().__init__(
@@ -61,12 +71,13 @@ class GenerationExecutorProxy(GenerationExecutor):
             is_llm_executor=is_llm_executor,
         )
 
-
         # Proxy 自身状态字段，防止重复启动 Worker
         self.workers_started = False
 
         # type = GenerationExecutorWorker
         self.worker_cls = worker_cls
+
+        self.max_num_workers = max_num_workers
 
         mpi_process_pre_spawned: bool = get_spawn_proxy_process_env()
 
@@ -76,7 +87,13 @@ class GenerationExecutorProxy(GenerationExecutor):
                 self.mpi_session = create_mpi_comm_session(model_world_size)
             else:
                 print_colored_debug('create pool session ...\n', "yellow")
-                self.mpi_session = MpiPoolSession(n_workers=model_world_size)
+                if lazy_load:
+                    print_colored_debug(
+                        f'Using MpiPoolSession with max_num_workers={max_num_workers} for lazy loading...\n',
+                        "yellow")
+                    self.mpi_session = MpiPoolSession(n_workers=max_num_workers)
+                else:
+                    self.mpi_session = MpiPoolSession(n_workers=model_world_size)
         else:
             print_colored_debug('using external mpi session ...\n', "yellow")
             self.mpi_session = mpi_session
@@ -93,7 +110,10 @@ class GenerationExecutorProxy(GenerationExecutor):
 
         self._results: Dict[int, GenerationResult] = {}
 
-        self.model_world_size = model_world_size
+        if lazy_load:
+            self.model_world_size = None  # unknown at init time
+        else:
+            self.model_world_size = model_world_size
 
         self.garbage_collection_gen0_threshold = garbage_collection_gen0_threshold
 
@@ -155,9 +175,12 @@ class GenerationExecutorProxy(GenerationExecutor):
         # 新增 control queue，用于 proxy -> worker 控制指令（例如 LOAD_MODEL）
         # 使用 IpcQueue server 端，worker 端以 client 方式连接（is_server=False）
         if self.lazy_load:
-            self.control_queue = IpcQueue(
-                is_server=True,
-                name="proxy_control_queue")
+            self.control_queue_lst = []
+            for i in range(self.max_num_workers):
+                control_queue = IpcQueue(
+                    is_server=True,
+                    name=f"proxy_control_queue_{i}")
+                self.control_queue_lst.append(control_queue)
 
         return WorkerCommIpcAddrs(
             request_queue_addr=self.request_queue.address,
@@ -166,7 +189,8 @@ class GenerationExecutorProxy(GenerationExecutor):
             stats_queue_addr=self.mp_stats_queue.address,
             load_stats_queue_addr=self.load_stats_queue.address,
             kv_cache_events_queue_addr=self.kv_cache_events_queue.address,
-            control_queue_addr=self.control_queue.address if self.lazy_load else None,
+            control_queue_addrs=[control_queue.address for control_queue in self.control_queue_lst] \
+                                 if self.lazy_load else None,
         )
 
     def abort_request(self, request_id: int) -> None:
@@ -336,11 +360,13 @@ class GenerationExecutorProxy(GenerationExecutor):
             tracer_init_kwargs=tracer_init_kwargs,
             _torch_model_class_mapping=MODEL_CLASS_MAPPING,
             ready_signal=GenerationExecutorProxy.READY_SIGNAL,
+            pause_signal=GenerationExecutorProxy.PAUSED_SIGNAL,
         )
         for fut in self.mpi_futures:
             fut.add_done_callback(mpi_done_callback)
 
         self.workers_started = True
+        self.model_loaded = False
 
         while True:
             if self.worker_init_status_queue.poll(1):
@@ -354,8 +380,7 @@ class GenerationExecutorProxy(GenerationExecutor):
         # 处理可能的状态：READY (原来) 或 PAUSED_NO_MODEL（lazy 模式）
         if ready_signal == GenerationExecutorProxy.READY_SIGNAL:
             self.model_loaded = True
-        elif ready_signal == "PAUSED_NO_MODEL":
-            logger.info("Workers started in paused (no model) state")
+        elif ready_signal == GenerationExecutorProxy.PAUSED_SIGNAL:
             self.model_loaded = False
         else:
             # error case
@@ -363,22 +388,36 @@ class GenerationExecutorProxy(GenerationExecutor):
             self.mpi_session.shutdown_abort(reason=ready_signal)
             raise RuntimeError("Executor worker returned error") from ready_signal
 
-    def trigger_model_load(self, timeout: Optional[float] = None):
+    def load_model(
+        self,
+        model_name: str,
+        engine_dir: Union[str, Path],
+        tp_size: int = 1,
+        pp_size: int = 1,
+        timeout: Optional[float] = None
+    ) -> None:
         """
-        Send LOAD_MODEL control command to all workers (by posting model_world_size messages),
-        then wait for READY_SIGNAL from workers.
+        Send LOAD_MODEL control command to the leader worker and wait for READY_SIGNAL from workers.
         """
         if getattr(self, "model_loaded", False):
             logger.info("Model already loaded on workers.")
             return
 
         # Make sure control_queue exists
-        if not hasattr(self, "control_queue") or self.control_queue is None:
+        if not hasattr(self, "control_queue_lst") or self.control_queue_lst is None:
             raise RuntimeError("Control queue is not available to trigger model load.")
 
-        # FIXME: The signal should not be broadcasted, we should activate only the needed workers.
-        self.control_queue.put(LazyLoadRequest())
-
+        # The signal should be broadcasted to the needed workers.
+        load_model_request = LoadModelRequest(
+            model_name=model_name,
+            engine_dir=engine_dir,
+            worker_ranks=list(range(tp_size * pp_size)),
+            tp_size=tp_size,
+            pp_size=pp_size,
+        )
+        self.model_world_size = tp_size * pp_size
+        for i in range(self.model_world_size):
+            self.control_queue_lst[i].put_noblock(load_model_request)
         logger.info("Sent LOAD_MODEL to workers, waiting for READY...")
 
         start = time.time()
@@ -390,7 +429,7 @@ class GenerationExecutorProxy(GenerationExecutor):
                     logger.info("All workers reported READY after model loading.")
                     return
                 else:
-                    logger.error(f"Worker returned error during model load: {ready_signal}")
+                    logger.error(f"Worker returned error during model load: {error_trace}")
                     self.mpi_session.shutdown_abort(reason=ready_signal)
                     raise RuntimeError("Executor worker returned error") from ready_signal
 
@@ -401,6 +440,46 @@ class GenerationExecutorProxy(GenerationExecutor):
             # if any worker future finished unexpectedly -> error
             if any(fut.done() for fut in self.mpi_futures):
                 raise RuntimeError("Executor worker died during model loading")
+
+            self._handle_background_error()
+    
+    def unload_model(self):
+        """
+        Send UNLOAD_MODEL control command to all workers (leader and subordinates).
+        """
+        if not getattr(self, "model_loaded", True):
+            logger.warning("Model has not been loaded on workers yet.")
+            return
+        
+        # Send UnloadModelRequest to leader via request_queue
+        self.request_queue.put(UnloadModelRequest())
+        
+        # # Send UnloadModelRequest to all subordinate workers via control_queue
+        # # This ensures subordinates can exit from block_subordinates()
+        # if hasattr(self, "control_queue_lst") and self.control_queue_lst is not None:
+        #     for i in range(self.model_world_size):
+        #         try:
+        #             self.control_queue_lst[i].put_noblock(UnloadModelRequest())
+        #         except Exception as e:
+        #             logger.warning(f"Failed to send UnloadModelRequest to control_queue {i}: {e}")
+        
+        logger.info("Sent UNLOAD_MODEL to all workers, waiting for PAUSE...")
+
+        while True:
+            if self.worker_init_status_queue.poll(1):
+                pause_signal, error_trace = self.worker_init_status_queue.get()
+                if pause_signal == GenerationExecutorProxy.PAUSED_SIGNAL:
+                    self.model_loaded = False
+                    logger.info("All workers reported PAUSED after model unloading.")
+                    return
+                else:
+                    logger.error(f"Worker returned error during model unload: {error_trace}")
+                    self.mpi_session.shutdown_abort(reason=pause_signal)
+                    raise RuntimeError("Executor worker returned error") from pause_signal
+            
+            # if any worker future finished unexpectedly -> error
+            if any(fut.done() for fut in self.mpi_futures):
+                raise RuntimeError("Executor worker died during model unloading")
 
             self._handle_background_error()
 
@@ -424,6 +503,12 @@ class GenerationExecutorProxy(GenerationExecutor):
         # notify the workers to quit
         if all(not f.done() for f in self.mpi_futures):
             self.request_queue.put_noblock(None, retry=4)
+            if hasattr(self, 'control_queue_lst'):
+                for control_queue in self.control_queue_lst:
+                    try:
+                        control_queue.put_noblock(None, retry=2)
+                    except Exception as e:
+                        logger.warning(f"Failed to send None to control_queue: {e}")
 
     def shutdown(self):
         if not self.workers_started:
@@ -465,9 +550,10 @@ class GenerationExecutorProxy(GenerationExecutor):
         self.mp_stats_queue.close()
         self.kv_cache_events_queue.close()
         
-        # Close control_queue if it exists (lazy_load mode)
-        if hasattr(self, 'control_queue') and self.control_queue is not None:
-            self.control_queue.close()
+        # Close control_queue in control_queue_list if it exists (lazy_load mode)
+        if hasattr(self, 'control_queue_list') and self.control_queue_list is not None:
+            for control_queue in self.control_queue_list:
+                control_queue.close()
 
         self.workers_started = False
         self.mpi_session.shutdown()

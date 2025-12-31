@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 import numpy as np
 import nvtx
 from mpi4py import MPI
+from mpi4py.MPI import Intracomm
 from mpi4py.util import pkl5
 from packaging import version
 
@@ -480,6 +481,13 @@ local_comm = mpi_comm().Split_type(split_type=OMPI_COMM_TYPE_HOST)
 
 def local_mpi_comm():
     return local_comm
+
+
+def sub_local_mpi_comm(ranks: Sequence[int]):
+    group = mpi_comm().Get_group()
+    sub_group = group.Incl(ranks)
+    sub_comm = mpi_comm().Create_group(sub_group)
+    return sub_comm
 
 
 def mpi_rank():

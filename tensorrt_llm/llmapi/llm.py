@@ -18,7 +18,7 @@ from tensorrt_llm.inputs.registry import DefaultInputProcessor
 
 from .._utils import nvtx_range_debug
 from ..bindings import executor as tllm
-from ..builder import EngineConfig
+from ..builder import BuildConfig, EngineConfig, PretrainedConfig
 from ..disaggregated_params import DisaggregatedParams
 from ..executor import (DetokenizedGenerationResultBase, GenerationExecutor,
                         GenerationResult, IterationResult, LoRARequest,
@@ -32,7 +32,7 @@ from ..logger import logger
 from ..sampling_params import SamplingParams
 from ..scheduling_params import SchedulingParams
 from .llm_args import (TORCH_LLMARGS_EXPLICIT_DOCSTRING,
-                       TRT_LLMARGS_EXPLICIT_DOCSTRING, NGramDecodingConfig,
+                       TRT_LLMARGS_EXPLICIT_DOCSTRING, _ModelFormatKind, NGramDecodingConfig,
                        PeftCacheConfig, PybindMirror, TorchLlmArgs, TrtLlmArgs)
 from .llm_utils import (CachedModelLoader, KvCacheRetentionConfig,
                         LlmBuildStats, ModelLoader, _ModelRuntimeContext)
@@ -933,20 +933,39 @@ class _TrtLLM(BaseLLM):
             ),
             is_llm_executor=True,
             lora_config=lora_config,
-            lazy_load=self.lazy_load)
+            lazy_load=self.lazy_load,
+            max_num_workers=get_device_count() if self.lazy_load else None,
+        )
 
-    def lazy_load_model(self) -> None:
+    def load_model(
+        self,
+        model_name: str,
+        engine_root: str,
+        tp_size: int = 1,
+        pp_size: int = 1,
+    ) -> None:
         """Lazy load the model engine if it was not loaded during initialization.
         This function should be called only when `lazy_load` parameter is set to True during LLM initialization.
         """
         if not self.lazy_load:
             logger.warning(
-                "LLM was not initialized with lazy_load=True, cannot call lazy_load_model()."
+                "LLM was not initialized with lazy_load=True, cannot call load_model()."
             )
             return
         if self._executor is not None:
-            self._executor.trigger_model_load()
+            self._engine_dir = Path(engine_root).joinpath(f"tp_{tp_size}_pp_{pp_size}")
+            self._executor_config.llm_parallel_config.tp_size = tp_size
+            self._executor_config.llm_parallel_config.pp_size = pp_size
+            self._executor.load_model(
+                model_name=model_name,
+                engine_dir=self._engine_dir,
+                tp_size=tp_size,
+                pp_size=pp_size,
+            )
             return
+    
+    def unload_model(self):
+        self._executor.unload_model()
 
 
 @append_docstring(TORCH_LLM_DOCSTRING)

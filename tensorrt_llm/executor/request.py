@@ -143,8 +143,18 @@ class LoadStatsRequest:
         pass
 
 
-class LazyLoadRequest:
+@dataclass
+class LoadModelRequest:
     ''' Request to trigger lazy model loading '''
+    model_name: str
+    engine_dir: str
+    worker_ranks: List[int]
+    tp_size: int
+    pp_size: int
+
+
+class UnloadModelRequest:
+    ''' Request to trigger model unloading '''
     
     def __init__(self):
         pass

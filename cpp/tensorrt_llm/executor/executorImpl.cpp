@@ -1158,7 +1158,7 @@ void Executor::Impl::shutdown()
     // undefined order and can cause crashes on program exit.
     if (mIsWorker)
     {
-        tensorrt_llm::mpi::MpiComm::setSession(tensorrt_llm::mpi::MpiComm(MPI_COMM_WORLD, false));
+        tensorrt_llm::mpi::MpiComm::unsafeResetSessionToWorld();
     }
 }
 

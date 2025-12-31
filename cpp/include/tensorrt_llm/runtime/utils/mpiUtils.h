@@ -425,12 +425,22 @@ public:
         return !(rhs == *this);
     }
 
+    static void unsafeResetSessionToWorld()
+    {
+        auto& session = mutableSession();
+        session = std::move(MpiComm(MPI_COMM_WORLD, false));
+
+        // 绝对不要调用 refreshLocalSession() !!!
+    }
+
 private:
     //! \brief Corresponds to `world()` by default, but can be overridden per process.
     static MpiComm& mutableSession();
 
     //! \brief Returns the MPI local communicator.
     static MpiComm& mutableLocalSession();
+
+    static MpiComm& staticLocalSession();
 
     static void refreshLocalSession();
 

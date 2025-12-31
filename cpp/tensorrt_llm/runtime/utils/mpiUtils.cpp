@@ -501,13 +501,22 @@ MpiComm& MpiComm::mutableLocalSession()
     return localSession;
 }
 
+MpiComm& MpiComm::staticLocalSession()
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    static MpiComm staticLocalSession = initLocalSession();
+    staticLocalSession.mFreeComm = true;
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    return staticLocalSession;
+}
+
 void MpiComm::refreshLocalSession()
 {
 #if ENABLE_MULTI_DEVICE
     static std::mutex mutex;
     std::unique_lock lock(mutex);
     auto initSessionRanks = getWorldRanks(MpiComm::session());
-    auto localSessionRanks = getWorldRanks(MpiComm::localSession());
+    auto localSessionRanks = getWorldRanks(MpiComm::staticLocalSession());
 
     // Add to intersectionRanks in order of initSessionRanks
     std::vector<int> intersectionRanks;
@@ -544,9 +553,14 @@ MpiComm::~MpiComm() noexcept
 #if ENABLE_MULTI_DEVICE
     if (mFreeComm && mComm)
     {
-        if (MPI_Comm_free(&mComm) != MPI_SUCCESS)
+        int finalized = 0;
+        MPI_Finalized(&finalized);
+        if (!finalized)
         {
-            TLLM_LOG_ERROR("MPI_Comm_free failed");
+            if (MPI_Comm_free(&mComm) != MPI_SUCCESS)
+            {
+                TLLM_LOG_ERROR("MPI_Comm_free failed");
+            }
         }
     }
 #endif // ENABLE_MULTI_DEVICE

@@ -357,6 +357,7 @@ class GenerationExecutor(ABC):
         lora_config: Optional[LoraConfig] = None,
         garbage_collection_gen0_threshold: Optional[int] = None,
         lazy_load: bool = False,
+        max_num_workers: Optional[int] = None,
     ) -> Union["GenerationExecutorProxy", "GenerationExecutorWorker"]:
 
         # local imports to avoid cyclic importing
@@ -404,7 +405,8 @@ class GenerationExecutor(ABC):
                 is_llm_executor=is_llm_executor,
                 garbage_collection_gen0_threshold=
                 garbage_collection_gen0_threshold,
-                lazy_load=lazy_load)
+                lazy_load=lazy_load,
+                max_num_workers=max_num_workers,)
 
         # WAR: For the performance of gathering logits, we use single process worker
         # for TP1 to avoid the large overhead of IPC.
@@ -431,7 +433,8 @@ class GenerationExecutor(ABC):
                 is_llm_executor=is_llm_executor,
                 garbage_collection_gen0_threshold=
                 garbage_collection_gen0_threshold,
-                lazy_load=lazy_load)
+                lazy_load=lazy_load,
+                max_num_workers=max_num_workers,)
         else:
             ctx = multiprocessing.get_context("spawn")
             # The ProcessPoolExecutorSession is used to support Windows, as mpi4py cannot.
@@ -445,7 +448,8 @@ class GenerationExecutor(ABC):
                 is_llm_executor=is_llm_executor,
                 garbage_collection_gen0_threshold=
                 garbage_collection_gen0_threshold,
-                lazy_load=lazy_load)
+                lazy_load=lazy_load,
+                max_num_workers=max_num_workers,)
 
     def wait_first_completed(
         self, futures: List[GenerationResult]
