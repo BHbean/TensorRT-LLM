@@ -151,6 +151,7 @@ class LoadModelRequest:
     worker_ranks: List[int]
     tp_size: int
     pp_size: int
+    device_ids: List[int]
 
 
 class UnloadModelRequest:

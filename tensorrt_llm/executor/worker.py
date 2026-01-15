@@ -143,8 +143,11 @@ class GenerationExecutorWorker(GenerationExecutor):
         lora_config: Optional[LoraConfig] = None,
         garbage_collection_gen0_threshold: Optional[int] = None,
         sub_comm: Optional[Intracomm] = None,
+        device_id: Optional[int] = None,
     ) -> tllm.Executor:
-        device_id = self.global_rank % torch.cuda.device_count()
+        print(f"[TEST-WORKER] Worker {self.global_rank} Using device_id: {device_id}")
+        if device_id is None:
+            device_id = self.global_rank % torch.cuda.device_count()
         torch.cuda.set_device(device_id)
 
         # Make sure C++ executor would use same devices/ranks as py_executor
@@ -157,6 +160,7 @@ class GenerationExecutorWorker(GenerationExecutor):
             device_ids = mpi_comm().allgather(device_id)
         executor_config.parallel_config = tllm.ParallelConfig(
             participant_ids=comm_ranks, device_ids=device_ids)
+        print(f"[TEST-WORKER] Workers Using device_ids: {device_ids}")
 
         if isinstance(engine, Engine):
             return tllm.Executor(engine.engine,
@@ -250,6 +254,7 @@ class GenerationExecutorWorker(GenerationExecutor):
         tp_size: int = 1,
         pp_size: int = 1,
         sub_comm: Intracomm = None,
+        device_id: int = None,
     ) -> None:
         """Load model when lazy_load is enabled"""
         if self.model_loaded:
@@ -274,6 +279,7 @@ class GenerationExecutorWorker(GenerationExecutor):
             lora_config=config['lora_config'],
             garbage_collection_gen0_threshold=config['garbage_collection_gen0_threshold'],
             sub_comm=sub_comm,
+            device_id=device_id,
         )
         self.model_loaded = True
         self._post_create_engine(
@@ -940,12 +946,14 @@ def worker_main(
             sub_comm.Barrier()
 
         if load_model_req is not None and global_mpi_rank() in load_model_req.worker_ranks:
+            worker_local_idx = load_model_req.worker_ranks.index(global_mpi_rank())
             worker.load_model(
                 model_name=load_model_req.model_name,
                 engine_dir=load_model_req.engine_dir,
                 tp_size=load_model_req.tp_size,
                 pp_size=load_model_req.pp_size,
                 sub_comm=sub_comm,
+                device_id=load_model_req.device_ids[worker_local_idx] if load_model_req.device_ids is not None else None,
             )
             print_colored_debug(f"Worker {mpi_rank()} finished loading model.\n",
                                 "green")

@@ -4,7 +4,7 @@ import threading
 import time
 import traceback
 import weakref
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Union, List
 import asyncio
 import json
 from pathlib import Path
@@ -394,6 +394,7 @@ class GenerationExecutorProxy(GenerationExecutor):
         engine_dir: Union[str, Path],
         tp_size: int = 1,
         pp_size: int = 1,
+        device_ids: List[int] = None,
         timeout: Optional[float] = None
     ) -> None:
         """
@@ -414,6 +415,7 @@ class GenerationExecutorProxy(GenerationExecutor):
             worker_ranks=list(range(tp_size * pp_size)),
             tp_size=tp_size,
             pp_size=pp_size,
+            device_ids=device_ids,
         )
         self.model_world_size = tp_size * pp_size
         for i in range(self.model_world_size):

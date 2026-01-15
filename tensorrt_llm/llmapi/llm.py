@@ -943,6 +943,7 @@ class _TrtLLM(BaseLLM):
         engine_root: str,
         tp_size: int = 1,
         pp_size: int = 1,
+        device_ids: Optional[List[int]] = None,
     ) -> None:
         """Lazy load the model engine if it was not loaded during initialization.
         This function should be called only when `lazy_load` parameter is set to True during LLM initialization.
@@ -952,6 +953,10 @@ class _TrtLLM(BaseLLM):
                 "LLM was not initialized with lazy_load=True, cannot call load_model()."
             )
             return
+        if device_ids is not None:
+            assert len(device_ids) == tp_size * pp_size, \
+                f"Length of device_ids ({len(device_ids)}) must equal to tp_size * pp_size ({tp_size * pp_size})"
+
         if self._executor is not None:
             self._engine_dir = Path(engine_root).joinpath(f"tp_{tp_size}_pp_{pp_size}")
             self._executor_config.llm_parallel_config.tp_size = tp_size
@@ -961,6 +966,7 @@ class _TrtLLM(BaseLLM):
                 engine_dir=self._engine_dir,
                 tp_size=tp_size,
                 pp_size=pp_size,
+                device_ids=device_ids,
             )
             return
     
