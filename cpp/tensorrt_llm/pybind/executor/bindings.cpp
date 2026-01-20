@@ -168,6 +168,8 @@ void initBindings(pybind11::module_& m)
         .def(py::init<>())
         .def_readwrite("num_active_requests", &tle::LoadStats::numActiveRequests)
         .def_readwrite("num_queued_requests", &tle::LoadStats::numQueuedRequests)
+        .def_readwrite("num_active_tokens", &tle::LoadStats::numActiveTokens)
+        .def_readwrite("num_queued_tokens", &tle::LoadStats::numQueuedTokens)
         .def("to_json_str",
             [](tle::LoadStats const& loadStats)
             { return tle::JsonSerialization::toJsonStr(loadStats); });

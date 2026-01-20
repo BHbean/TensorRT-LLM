@@ -301,6 +301,8 @@ private:
     // Load stats
     std::atomic<SizeType32> mNumActiveRequestsRealTime{0};
     std::atomic<SizeType32> mNumQueuedRequestsRealTime{0};
+    std::atomic<SizeType32> mActiveTokensRealTime{0};
+    std::atomic<SizeType32> mQueuedTokensRealTime{0};
 
     // Debug
     IterationType mDebugTensorsMaxIterations;

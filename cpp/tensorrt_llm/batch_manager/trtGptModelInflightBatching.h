@@ -130,6 +130,8 @@ public:
         SizeType32 numCtxRequests{};
         SizeType32 numGenRequests{};
         SizeType32 numCtxTokens{};
+        SizeType32 numActiveTokens{};   // tokens of all running requests in this batch
+        SizeType32 numQueuedTokens{};   // tokens of requests that are not scheduled in this batch
         float avgNumDecodedTokensPerIter{};
         ReqIdsSet scheduledRequests;
         ReqIdsSet pausedRequests;

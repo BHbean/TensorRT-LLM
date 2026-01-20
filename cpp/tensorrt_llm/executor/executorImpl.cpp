@@ -1825,6 +1825,13 @@ IterationStats Executor::Impl::getCurrentIterationStats(RequestList const& activ
 
     // Model specific stats
     mModel->getCurrentIterationStats(stats);
+
+    // Get number of active/queued tokens if available
+    if (stats.inflightBatchingStats)
+    {
+        mActiveTokensRealTime.store(stats.inflightBatchingStats->numActiveTokens, std::memory_order_relaxed);
+        mQueuedTokensRealTime.store(stats.inflightBatchingStats->numQueuedTokens, std::memory_order_relaxed);
+    }
     return stats;
 }
 
@@ -1833,6 +1840,8 @@ LoadStats Executor::Impl::getCurrentLoadStats()
     LoadStats stats;
     stats.numActiveRequests = mNumActiveRequestsRealTime.load(std::memory_order_relaxed);
     stats.numQueuedRequests = mNumQueuedRequestsRealTime.load(std::memory_order_relaxed);
+    stats.numActiveTokens = mActiveTokensRealTime.load(std::memory_order_relaxed);
+    stats.numQueuedTokens = mQueuedTokensRealTime.load(std::memory_order_relaxed);
     return stats;
 }
 

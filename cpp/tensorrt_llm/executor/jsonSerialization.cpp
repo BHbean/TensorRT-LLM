@@ -47,7 +47,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(RequestStats, id, stage, contextPrefillPositi
     avgNumDecodedTokensPerIter, scheduled, paused, disServingStats, allocTotalBlocksPerRequest,
     allocNewBlocksPerRequest, reusedBlocksPerRequest, missedBlocksPerRequest, kvCacheHitRatePerRequest);
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(RequestStatsPerIteration, iter, requestStats);
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LoadStats, numActiveRequests, numQueuedRequests);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LoadStats, numActiveRequests, numQueuedRequests, numActiveTokens, numQueuedTokens);
 
 std::string JsonSerialization::toJsonStr(IterationStats const& iterationStats)
 {

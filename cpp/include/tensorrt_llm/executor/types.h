@@ -291,6 +291,10 @@ struct InflightBatchingStats
     SizeType32 numCtxTokens;
     /// @brief Index of mirco batch
     SizeType32 microBatchId;
+    /// @brief Total number of active tokens in the iteration
+    SizeType32 numActiveTokens;
+    /// @brief Total number of tokens of the paused requests in the iteration
+    SizeType32 numQueuedTokens;
     /// @brief Average number of tokens decoded per request per iteration
     float avgNumDecodedTokensPerIter;
 };
@@ -371,6 +375,10 @@ struct LoadStats
     SizeType32 numActiveRequests;
     /// @brief Number of queued requests
     SizeType32 numQueuedRequests;
+    /// @brief Number of active tokens
+    SizeType32 numActiveTokens  ;
+    /// @brief Number of queued tokens
+    SizeType32 numQueuedTokens;
 };
 
 /// @brief Enum class that represents the state of a request

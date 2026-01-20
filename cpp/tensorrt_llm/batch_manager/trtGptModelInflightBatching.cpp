@@ -818,25 +818,32 @@ TrtGptModelInflightBatching::IterationStatsIFB TrtGptModelInflightBatching::fill
     auto const& buffers = mBuffers.at(contextBufferId);
     iterationStatsIfb.numCtxTokens = buffers->getNumContextTokens();
 
+    SizeType32 numActiveTokens = 0;
     for (auto const& llmReq : scheduledRequests.contextRequests)
     {
         iterationStatsIfb.scheduledRequests.insert(llmReq->mRequestId);
+        numActiveTokens += llmReq->getMaxBeamNumTokens();
     }
     for (auto const& llmReq : scheduledRequests.generationRequests)
     {
         iterationStatsIfb.scheduledRequests.insert(llmReq->mRequestId);
         iterationStatsIfb.avgNumDecodedTokensPerIter += llmReq->getAvgDecodedTokensPerIter();
+        numActiveTokens += llmReq->getMaxBeamNumTokens();
     }
+    iterationStatsIfb.numActiveTokens = numActiveTokens;
     if (iterationStatsIfb.numGenRequests > 0)
     {
         iterationStatsIfb.avgNumDecodedTokensPerIter /= iterationStatsIfb.numGenRequests;
         TLLM_LOG_DEBUG(
             "iterationStatsIfb.avgNumDecodedTokensPerIter = %.2f", iterationStatsIfb.avgNumDecodedTokensPerIter);
     }
+    SizeType32 numQueuedTokens = 0;
     for (auto const& llmReq : requestsToPause)
     {
         iterationStatsIfb.pausedRequests.insert(llmReq->mRequestId);
+        numQueuedTokens += llmReq->getMaxBeamNumTokens();
     }
+    iterationStatsIfb.numQueuedTokens = numQueuedTokens;
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
     return iterationStatsIfb;
@@ -2682,6 +2689,8 @@ void TrtGptModelInflightBatching::getCurrentIterationStats(executor::IterationSt
     modelStats.avgNumDecodedTokensPerIter = mLastIterationStatsIFB.avgNumDecodedTokensPerIter;
     modelStats.numCtxTokens = mLastIterationStatsIFB.numCtxTokens;
     modelStats.microBatchId = mLastIterationStatsIFB.microBatchId;
+    modelStats.numActiveTokens = mLastIterationStatsIFB.numActiveTokens;
+    modelStats.numQueuedTokens = mLastIterationStatsIFB.numQueuedTokens;
     stats.inflightBatchingStats = modelStats;
 }
 
