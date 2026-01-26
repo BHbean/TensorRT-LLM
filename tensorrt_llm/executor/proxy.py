@@ -73,6 +73,8 @@ class GenerationExecutorProxy(GenerationExecutor):
 
         # Proxy 自身状态字段，防止重复启动 Worker
         self.workers_started = False
+        # Record executor info from workers after model is loaded
+        self.executor_info_lst = []
 
         # type = GenerationExecutorWorker
         self.worker_cls = worker_cls
@@ -171,6 +173,12 @@ class GenerationExecutorProxy(GenerationExecutor):
             is_server=True,
             fuse_message=False,
             name="proxy_kv_cache_events_queue")
+        # Get executor info from workers
+        self.executor_info_queue = FusedIpcQueue(
+            is_server=True,
+            fuse_message=False,
+            socket_type=zmq.PULL,
+            name="proxy_executor_info_queue")
 
         # 新增 control queue，用于 proxy -> worker 控制指令（例如 LOAD_MODEL）
         # 使用 IpcQueue server 端，worker 端以 client 方式连接（is_server=False）
@@ -189,6 +197,7 @@ class GenerationExecutorProxy(GenerationExecutor):
             stats_queue_addr=self.mp_stats_queue.address,
             load_stats_queue_addr=self.load_stats_queue.address,
             kv_cache_events_queue_addr=self.kv_cache_events_queue.address,
+            executor_info_queue_addr=self.executor_info_queue.address,
             control_queue_addrs=[control_queue.address for control_queue in self.control_queue_lst] \
                                  if self.lazy_load else None,
         )
@@ -379,6 +388,10 @@ class GenerationExecutorProxy(GenerationExecutor):
 
         # 处理可能的状态：READY (原来) 或 PAUSED_NO_MODEL（lazy 模式）
         if ready_signal == GenerationExecutorProxy.READY_SIGNAL:
+            # Record executor info from all workers
+            self.executor_info_lst.clear()
+            for _ in range(self.model_world_size):
+                self.executor_info_lst.append(self.executor_info_queue.get())
             self.model_loaded = True
         elif ready_signal == GenerationExecutorProxy.PAUSED_SIGNAL:
             self.model_loaded = False
@@ -427,6 +440,9 @@ class GenerationExecutorProxy(GenerationExecutor):
             if self.worker_init_status_queue.poll(1):
                 ready_signal, error_trace = self.worker_init_status_queue.get()
                 if ready_signal == GenerationExecutorProxy.READY_SIGNAL:
+                    self.executor_info_lst.clear()
+                    for _ in range(tp_size * pp_size):
+                        self.executor_info_lst.append(self.executor_info_queue.get())
                     self.model_loaded = True
                     logger.info("All workers reported READY after model loading.")
                     return
@@ -630,6 +646,30 @@ class GenerationExecutorProxy(GenerationExecutor):
         self.request_queue.put(LoadStatsRequest())
         data = await asyncio.to_thread(self.load_stats_queue.get)
         return json.loads(data)
+
+    async def aget_server_info(self) -> dict:
+        """Asynchronously get current server information from the worker.
+        
+        This method sends a LoadStatsRequest to the worker and returns a LoadResult
+        object that can be used to retrieve the server information through the dedicated stats queue.
+        
+        Returns:
+            dict: A result object that can be used to get server information.
+        """
+        if not self.model_loaded:
+            raise RuntimeError("Model not loaded yet. Cannot get server info.")
+        
+        server_info = {}
+        min_token_capacity = json.loads(self.executor_info_lst[0])['tokenCapacity']
+        for info_str in self.executor_info_lst:
+            info = json.loads(info_str)
+            min_token_capacity = min(min_token_capacity, info['tokenCapacity'])
+        server_info['token_capacity'] = min_token_capacity
+
+        # FIXME: This value is hardcoded for Qwen3 8B model on a 40G A100 GPU.
+        server_info['max_prefill_throughput'] = 26000
+
+        return server_info
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.shutdown()

@@ -145,6 +145,7 @@ class WorkerCommIpcAddrs(NamedTuple):
     stats_queue_addr: tuple[str, Optional[bytes]]
     load_stats_queue_addr: tuple[str, Optional[bytes]]
     kv_cache_events_queue_addr: tuple[str, Optional[bytes]]
+    executor_info_queue_addr: tuple[str, Optional[bytes]]
     control_queue_addrs: Optional[List[tuple[str, Optional[bytes]]]] = None
 
 

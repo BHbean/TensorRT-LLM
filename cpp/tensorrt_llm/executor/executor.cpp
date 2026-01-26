@@ -117,6 +117,11 @@ LoadStats Executor::getCurrentLoadStats()
     return mImpl->getCurrentLoadStats();
 }
 
+ExecutorInfo Executor::getExecutorInfo()
+{
+    return mImpl->getExecutorInfo();
+}
+
 std::deque<DebugTensorsPerIteration> Executor::getLatestDebugTensors()
 {
     return mImpl->getLatestDebugTensors();

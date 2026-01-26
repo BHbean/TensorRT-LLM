@@ -11,6 +11,7 @@ from queue import Queue
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+import zmq
 
 from tensorrt_llm.logger import logger
 
@@ -444,6 +445,9 @@ class GenerationExecutorWorker(GenerationExecutor):
 
     def get_current_load_stats(self) -> tllm.LoadStats:
         return self.engine.get_current_load_stats()
+    
+    def get_executor_info(self) -> tllm.ExecutorInfo:
+        return self.engine.get_executor_info()
 
     def start(self):
         # create iteration result queues
@@ -779,6 +783,7 @@ def worker_main(
     result_queues: Optional[List[IpcQueue]] = None
     load_stats_queue: Optional[IpcQueue] = None
     control_queue: Optional[IpcQueue] = None
+    executor_info_queue: Optional[IpcQueue] = None
 
     postproc_worker_config = postproc_worker_config or PostprocWorkerConfig()
 
@@ -841,7 +846,12 @@ def worker_main(
         control_queue = IpcQueue(
             worker_queues.control_queue_addrs[mpi_rank()],
             is_server=False,
-            name=f"worker_control_queue_{mpi_rank()}")
+            name=f"worker_control_queue_{mpi_rank()}")    
+    executor_info_queue = IpcQueue(
+        worker_queues.executor_info_queue_addr,
+        is_server=False,
+        socket_type=zmq.PUSH,
+        name=f"worker_executor_info_queue")
 
     def notify_proxy_threads_to_quit():
         # Signal the dispatcher thread in the proxy to quit
@@ -955,6 +965,7 @@ def worker_main(
                 sub_comm=sub_comm,
                 device_id=load_model_req.device_ids[worker_local_idx] if load_model_req.device_ids is not None else None,
             )
+            executor_info_queue.put(worker.get_executor_info().to_json_str())
             print_colored_debug(f"Worker {mpi_rank()} finished loading model.\n",
                                 "green")
 
@@ -975,6 +986,8 @@ def worker_main(
                         worker._set_iteration_result_queue(worker.kv_events_queues,
                                                         kv_cache_events_queue)
                         is_it_result_queue_set = True
+                    if not lazy_load:   # exexcutor info is not sent when lazy_load is False here
+                        executor_info_queue.put(worker.get_executor_info().to_json_str())
                     worker_init_status_queue.put((ready_signal, None))
                     while (req := request_queue.get()) is not None:
                         if isinstance(req, CancellingRequest):

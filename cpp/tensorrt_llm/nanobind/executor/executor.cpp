@@ -219,6 +219,7 @@ void Executor::initBindings(nb::module_& m)
         .def("get_latest_request_stats", &Executor::getLatestRequestStats)
         .def("get_latest_debug_tensors", &Executor::getLatestDebugTensors)
         .def("get_current_load_stats", &Executor::getCurrentLoadStats)
+        .def("get_executor_info", &Executor::getExecutorInfo)
         .def("can_enqueue_requests", &Executor::canEnqueueRequests)
         .def("get_kv_cache_event_manager", &Executor::getKVCacheEventManager);
 }

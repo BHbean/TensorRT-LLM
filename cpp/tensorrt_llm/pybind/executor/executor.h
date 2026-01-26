@@ -115,6 +115,11 @@ public:
         return mExecutor->getCurrentLoadStats();
     }
 
+    tle::ExecutorInfo getExecutorInfo()
+    {
+        return mExecutor->getExecutorInfo();
+    }
+
     [[nodiscard]] bool canEnqueueRequests() const
     {
         return mExecutor->canEnqueueRequests();

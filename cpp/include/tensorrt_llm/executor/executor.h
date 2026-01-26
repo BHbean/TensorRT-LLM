@@ -1852,6 +1852,10 @@ public:
     /// @return Load stats
     LoadStats getCurrentLoadStats();
 
+    /// @brief  Returns the executor info.
+    /// @return Executor info
+    ExecutorInfo getExecutorInfo();
+
     /// @brief  Returns the debug tensors of each iteration computed since last call to getLatestDebugTensors.
     ///         Contains at most debugTensorsMaxIterations iterations.
     /// @return Request debug tensors grouped by iterations
@@ -1885,6 +1889,9 @@ public:
 
     /// @brief Utility function to convert a loadStats struct to a json serialized string
     [[nodiscard]] static std::string toJsonStr(LoadStats const& loadStats);
+
+    /// @brief Utility function to convert a ExecutorInfo struct to a json serialized string
+    [[nodiscard]] static std::string toJsonStr(ExecutorInfo const& executorInfo);
 };
 
 } // namespace tensorrt_llm::executor

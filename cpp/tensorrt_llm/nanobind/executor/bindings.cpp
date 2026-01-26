@@ -174,6 +174,13 @@ void initBindings(nb::module_& m)
             [](tle::LoadStats const& loadStats)
             { return tle::JsonSerialization::toJsonStr(loadStats); });
 
+    nb::class_<tle::ExecutorInfo, "LoadStats">(m, "ExecutorInfo")
+        .def(nb::init<>())
+        .def_rw("token_capacity", &tle::ExecutorInfo::tokenCapacity)
+        .def("to_json_str",
+            [](tle::ExecutorInfo const& executorInfo)
+            { return tle::JsonSerialization::toJsonStr(executorInfo); });
+
     nb::class_<tle::DebugTensorsPerIteration>(m, "DebugTensorsPerIteration")
         .def(nb::init<>())
         .def_rw("iter", &tle::DebugTensorsPerIteration::iter)

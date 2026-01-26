@@ -174,6 +174,13 @@ void initBindings(pybind11::module_& m)
             [](tle::LoadStats const& loadStats)
             { return tle::JsonSerialization::toJsonStr(loadStats); });
 
+    py::class_<tle::ExecutorInfo>(m, "ExecutorInfo")
+        .def(py::init<>())
+        .def_readwrite("token_capacity", &tle::ExecutorInfo::tokenCapacity)
+        .def("to_json_str",
+            [](tle::ExecutorInfo const& executorInfo)
+            { return tle::JsonSerialization::toJsonStr(executorInfo); });
+
     py::class_<tle::DebugTensorsPerIteration>(m, "DebugTensorsPerIteration")
         .def(py::init<>())
         .def_readwrite("iter", &tle::DebugTensorsPerIteration::iter)

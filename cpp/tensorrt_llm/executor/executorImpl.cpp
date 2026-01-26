@@ -16,6 +16,7 @@
  */
 
 #include "tensorrt_llm/executor/executorImpl.h"
+#include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/trtEncoderModel.h"
 #include "tensorrt_llm/batch_manager/trtGptModelFactory.h"
 #include "tensorrt_llm/common/assert.h"
@@ -283,6 +284,11 @@ void Executor::Impl::loadModel(std::optional<std::filesystem::path> const& model
     else
     {
         mModel = createModel(rawEngine, modelConfig, worldConfig, executorConfig);
+        auto kvCacheManager = mModel->getKVCacheManager();
+        if (kvCacheManager)
+        {
+            mTokenCapacity = kvCacheManager->getMaxNumBlocks() * kvCacheManager->getTokensPerBlock();
+        }
     }
 };
 
@@ -1843,6 +1849,13 @@ LoadStats Executor::Impl::getCurrentLoadStats()
     stats.numActiveTokens = mActiveTokensRealTime.load(std::memory_order_relaxed);
     stats.numQueuedTokens = mQueuedTokensRealTime.load(std::memory_order_relaxed);
     return stats;
+}
+
+ExecutorInfo Executor::Impl::getExecutorInfo() const
+{
+    ExecutorInfo info;
+    info.tokenCapacity = mTokenCapacity;
+    return info;
 }
 
 RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(

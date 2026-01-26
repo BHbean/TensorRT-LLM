@@ -122,6 +122,7 @@ public:
     std::deque<RequestStatsPerIteration> getLatestRequestStats();
     std::deque<DebugTensorsPerIteration> getLatestDebugTensors();
     LoadStats getCurrentLoadStats();
+    ExecutorInfo getExecutorInfo() const;
 
     bool canEnqueueRequests() const;
 
@@ -303,6 +304,9 @@ private:
     std::atomic<SizeType32> mNumQueuedRequestsRealTime{0};
     std::atomic<SizeType32> mActiveTokensRealTime{0};
     std::atomic<SizeType32> mQueuedTokensRealTime{0};
+
+    // Executor info
+    SizeType32 mTokenCapacity;
 
     // Debug
     IterationType mDebugTensorsMaxIterations;

@@ -381,6 +381,13 @@ struct LoadStats
     SizeType32 numQueuedTokens;
 };
 
+/// @brief Struct that holds static executor information
+struct ExecutorInfo
+{
+    /// @brief Number of token capacity
+    SizeType32 tokenCapacity;
+};
+
 /// @brief Enum class that represents the state of a request
 enum class RequestStage
 {
