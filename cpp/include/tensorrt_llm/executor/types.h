@@ -287,6 +287,8 @@ struct InflightBatchingStats
     SizeType32 numGenRequests;
     /// @brief Number of paused requests
     SizeType32 numPausedRequests;
+    /// @brief Number of queued requests (not scheduled)
+    SizeType32 numQueuedRequests;
     /// @brief Total number of context tokens in the iteration
     SizeType32 numCtxTokens;
     /// @brief Index of mirco batch
@@ -379,6 +381,8 @@ struct LoadStats
     SizeType32 numActiveTokens  ;
     /// @brief Number of queued tokens
     SizeType32 numQueuedTokens;
+    /// @brief Number of physical used tokens
+    SizeType32 numPhysicalUsedTokens;
 };
 
 /// @brief Struct that holds static executor information

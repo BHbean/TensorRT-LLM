@@ -304,6 +304,7 @@ private:
     std::atomic<SizeType32> mNumQueuedRequestsRealTime{0};
     std::atomic<SizeType32> mActiveTokensRealTime{0};
     std::atomic<SizeType32> mQueuedTokensRealTime{0};
+    std::atomic<SizeType32> mPhysicalUsedTokensRealTime{0};
 
     // Executor info
     SizeType32 mTokenCapacity;

@@ -1813,12 +1813,15 @@ IterationStats Executor::Impl::getCurrentIterationStats(RequestList const& activ
     stats.newActiveRequestsQueueLatencyMS = newActiveRequestsQueueLatencyMS;
     // Active request count
     stats.numActiveRequests = static_cast<SizeType32>(activeRequests.size());
-    mNumActiveRequestsRealTime.store(stats.numActiveRequests, std::memory_order_relaxed);
     // Queued request count
+    SizeType32 numQueuedTokens = 0;
     {
         std::scoped_lock<std::mutex> lck(mQueuedReqMtx);
         stats.numQueuedRequests = static_cast<SizeType32>(mQueuedRequests.size());
-        mNumQueuedRequestsRealTime.store(stats.numQueuedRequests, std::memory_order_relaxed);
+        for (auto const& req : mQueuedRequests)
+        {
+            numQueuedTokens += req.req.getInputTokenIds().size();   // sum of prompt lengths
+        }
     }
     stats.numCompletedRequests = numCompletedRequests;
     // Max number of requests
@@ -1835,9 +1838,18 @@ IterationStats Executor::Impl::getCurrentIterationStats(RequestList const& activ
     // Get number of active/queued tokens if available
     if (stats.inflightBatchingStats)
     {
+        mNumActiveRequestsRealTime.store(stats.inflightBatchingStats->numScheduledRequests, std::memory_order_relaxed);
+        mNumQueuedRequestsRealTime.store(stats.inflightBatchingStats->numQueuedRequests + stats.numQueuedRequests, std::memory_order_relaxed);
         mActiveTokensRealTime.store(stats.inflightBatchingStats->numActiveTokens, std::memory_order_relaxed);
-        mQueuedTokensRealTime.store(stats.inflightBatchingStats->numQueuedTokens, std::memory_order_relaxed);
+        mQueuedTokensRealTime.store(stats.inflightBatchingStats->numQueuedTokens + numQueuedTokens, std::memory_order_relaxed);
     }
+
+    // Get KV cache stats if available
+    if (stats.kvCacheStats)
+    {
+        mPhysicalUsedTokensRealTime.store(stats.kvCacheStats->usedNumBlocks * stats.kvCacheStats->tokensPerBlock, std::memory_order_relaxed);
+    }
+
     return stats;
 }
 
@@ -1848,6 +1860,7 @@ LoadStats Executor::Impl::getCurrentLoadStats()
     stats.numQueuedRequests = mNumQueuedRequestsRealTime.load(std::memory_order_relaxed);
     stats.numActiveTokens = mActiveTokensRealTime.load(std::memory_order_relaxed);
     stats.numQueuedTokens = mQueuedTokensRealTime.load(std::memory_order_relaxed);
+    stats.numPhysicalUsedTokens = mPhysicalUsedTokensRealTime.load(std::memory_order_relaxed);
     return stats;
 }
 

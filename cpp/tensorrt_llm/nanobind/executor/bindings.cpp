@@ -170,6 +170,7 @@ void initBindings(nb::module_& m)
         .def_rw("num_queued_requests", &tle::LoadStats::numQueuedRequests)
         .def_rw("num_active_tokens", &tle::LoadStats::numActiveTokens)
         .def_rw("num_queued_tokens", &tle::LoadStats::numQueuedTokens)
+        .def_rw("num_physical_used_tokens", &tle::LoadStats::numPhysicalUsedTokens)
         .def("to_json_str",
             [](tle::LoadStats const& loadStats)
             { return tle::JsonSerialization::toJsonStr(loadStats); });

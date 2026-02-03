@@ -132,6 +132,7 @@ public:
         SizeType32 numCtxTokens{};
         SizeType32 numActiveTokens{};   // tokens of all running requests in this batch
         SizeType32 numQueuedTokens{};   // tokens of requests that are not scheduled in this batch
+        SizeType32 numQueuedRequests{};  // number of requests that are waiting in this iteration
         float avgNumDecodedTokensPerIter{};
         ReqIdsSet scheduledRequests;
         ReqIdsSet pausedRequests;
@@ -318,7 +319,7 @@ private:
     /// @details Should be called after setting up the current batch in executeBatch to get the correct number of
     /// context tokens.
     IterationStatsIFB fillIterationStats(
-        ScheduledRequests const& scheduledRequests, RequestVector const& requestsToPause);
+        ScheduledRequests const& scheduledRequests, RequestVector const& requestsToPause, RequestList const& activeRequests);
 
     /// @brief Function that sets up the TensorRT execution context that is going to be used for execution. If multiple
     /// TensorRT optimization profiles are built in the engine, it selects the corresponding context that is going to be

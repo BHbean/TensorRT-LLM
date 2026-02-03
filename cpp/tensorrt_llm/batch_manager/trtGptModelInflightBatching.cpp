@@ -804,7 +804,7 @@ void TrtGptModelInflightBatching::terminateRequestSync(
 }
 
 TrtGptModelInflightBatching::IterationStatsIFB TrtGptModelInflightBatching::fillIterationStats(
-    ScheduledRequests const& scheduledRequests, RequestVector const& requestsToPause)
+    ScheduledRequests const& scheduledRequests, RequestVector const& requestsToPause, RequestList const& activeRequests)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(fillIterationStats);
@@ -837,12 +837,24 @@ TrtGptModelInflightBatching::IterationStatsIFB TrtGptModelInflightBatching::fill
         TLLM_LOG_DEBUG(
             "iterationStatsIfb.avgNumDecodedTokensPerIter = %.2f", iterationStatsIfb.avgNumDecodedTokensPerIter);
     }
+
     SizeType32 numQueuedTokens = 0;
     for (auto const& llmReq : requestsToPause)
     {
         iterationStatsIfb.pausedRequests.insert(llmReq->mRequestId);
         numQueuedTokens += llmReq->getMaxBeamNumTokens();
     }
+    for (auto const& llmReq : activeRequests)
+    {
+        if (iterationStatsIfb.scheduledRequests.count(llmReq->mRequestId)
+            || iterationStatsIfb.pausedRequests.count(llmReq->mRequestId))
+        {
+            continue;
+        }
+        numQueuedTokens += llmReq->getMaxBeamNumTokens();
+    }
+    iterationStatsIfb.numQueuedRequests = activeRequests.size()
+        - iterationStatsIfb.scheduledRequests.size() - iterationStatsIfb.pausedRequests.size();
     iterationStatsIfb.numQueuedTokens = numQueuedTokens;
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -1148,7 +1160,7 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
 
             sync_check_cuda_error(mRuntime->getStream().get());
 
-            mLastIterationStatsIFB = fillIterationStats(currRequests, requestsToPause);
+            mLastIterationStatsIFB = fillIterationStats(currRequests, requestsToPause, activeRequests);
             for (auto const& requests : {currRequests.contextRequests, currRequests.generationRequests})
             {
                 for (auto const& llmReq : requests)
@@ -2686,6 +2698,7 @@ void TrtGptModelInflightBatching::getCurrentIterationStats(executor::IterationSt
     modelStats.numContextRequests = mLastIterationStatsIFB.numCtxRequests;
     modelStats.numGenRequests = mLastIterationStatsIFB.numGenRequests;
     modelStats.numPausedRequests = mLastIterationStatsIFB.pausedRequests.size();
+    modelStats.numQueuedRequests = mLastIterationStatsIFB.numQueuedRequests;
     modelStats.avgNumDecodedTokensPerIter = mLastIterationStatsIFB.avgNumDecodedTokensPerIter;
     modelStats.numCtxTokens = mLastIterationStatsIFB.numCtxTokens;
     modelStats.microBatchId = mLastIterationStatsIFB.microBatchId;
