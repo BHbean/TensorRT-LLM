@@ -43,6 +43,7 @@ class RequestFuncOutput:
         default_factory=list)  # list of inter-token latencies
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
+    arrival_time: float = 0.0
     error: str = ""
     decode_iteration: int = 0  # Number of decoding iterations
 
@@ -74,6 +75,7 @@ async def async_request_trt_llm(
         payload["min_length"] = request_func_input.output_len
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
+    output.arrival_time = time.time()
 
     ttft = 0.0
     st = time.perf_counter()
@@ -174,6 +176,7 @@ async def async_request_openai_completions(
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
+    output.arrival_time = time.time()
 
     generated_text = ""
     st = time.perf_counter()
@@ -316,6 +319,7 @@ async def async_request_openai_chat_completions(
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
+    output.arrival_time = time.time()
 
     generated_text = ""
     ttft = 0.0

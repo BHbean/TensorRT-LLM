@@ -49,6 +49,16 @@ class SampleRequest:
     expected_output_len: int
 
 
+@dataclass
+class SLOSampleRequest(SampleRequest):
+    """
+    Represents a single inference request for benchmarking with SLO and timestamp.
+    """
+    ttft_slo: float
+    tpot_slo: float
+    timestamp: float
+
+
 # -----------------------------------------------------------------------------
 # Benchmark Dataset Base Class
 # -----------------------------------------------------------------------------
@@ -609,6 +619,111 @@ class BurstGPTDataset(BenchmarkDataset):
 
 
 # -----------------------------------------------------------------------------
+# BurstGPT Trace Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class BurstGPTTraceDataset(BenchmarkDataset):
+    """
+    Implements the BurstGPT trace dataset with timestamp and SLO support.
+    Loads data from a CSV file and generates SLOSampleRequest.
+    """
+
+    def __init__(self, dataset_path: str, **kwargs) -> None:
+        super().__init__(dataset_path=dataset_path, **kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        df = pd.read_csv(self.dataset_path)
+        # Filter to keep only GPT-4 rows.
+        gpt4_df = df[df["Model"] == "GPT-4"]
+        # Remove failed requests (where Response tokens is 0 or less).
+        gpt4_df = gpt4_df[gpt4_df["Response tokens"] > 0]
+        # Keep only conversation type requests
+        gpt4_df = gpt4_df[gpt4_df["Log Type"] == "Conversation log"]
+        # Sort by timestamp to maintain temporal order
+        self.data = gpt4_df.sort_values(by="Timestamp")
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        ttft_slo: float = 0.5,
+        tpot_slo: float = 0.1,
+        scale_factor: float = 1.0,
+        **kwargs,
+    ) -> list[SLOSampleRequest]:
+
+        total_rows = len(self.data)
+
+        # Pick a contiguous slice if possible to preserve arrival pattern
+        if total_rows > num_requests:
+            random.seed(self.random_seed)
+            # Pick a random start point
+            start_idx = random.randint(0, total_rows - num_requests)
+            subset = self.data.iloc[start_idx:start_idx + num_requests].copy()
+        else:
+            subset = self.data.copy()
+            if num_requests > total_rows:
+                logger.warning(
+                    f"Requested {num_requests} samples but dataset only has {total_rows}. "
+                    "Returning all available samples.")
+
+        if len(subset) == 0:
+            return []
+
+        # Normalize timestamps relative to the start of this sample batch
+        start_time = subset['Timestamp'].iloc[0]
+        subset['relative_time'] = (subset['Timestamp'] -
+                                   start_time) * scale_factor
+
+        requests = []
+        vocab_size = tokenizer.vocab_size
+
+        # Iterate and create requests
+        for i, row in subset.iterrows():
+            prompt_len = int(row['Request tokens'])
+            output_len = int(row['Response tokens'])
+            timestamp = float(row['relative_time'])
+
+            # Synthetic prompt generation
+            token_ids = [(prompt_len + j) % vocab_size for j in range(prompt_len)]
+            prompt = tokenizer.decode(token_ids)
+
+            # SLO definitions
+            if prompt_len < 256:
+                ttft_slo = 0.25
+            elif prompt_len < 1024:
+                ttft_slo = 0.4
+            elif prompt_len <= 8192:
+                ttft_slo = 2.0
+            else:
+                ttft_slo = 4.0
+
+            requests.append(
+                SLOSampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    ttft_slo=ttft_slo,
+                    tpot_slo=tpot_slo,
+                    timestamp=timestamp,
+                ))
+
+        # Print average request rate for reference
+        if len(requests) > 1:
+            total_time = requests[-1].timestamp - requests[0].timestamp
+            avg_rate = len(requests) / total_time if total_time > 0 else float('inf')
+            logger.info(f"Generated {len(requests)} requests over {total_time:.2f} seconds. "
+                        f"Average request rate: {avg_rate:.2f} req/s.")
+        
+        return requests
+
+
+# -----------------------------------------------------------------------------
 # HuggingFace Dataset Base Implementation
 # -----------------------------------------------------------------------------
 class HuggingFaceDataset(BenchmarkDataset):
@@ -960,3 +1075,100 @@ class ASRDataset(HuggingFaceDataset):
                            " what Whisper supports.", skipped)
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Azure Trace Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class AzureTraceDataset(BenchmarkDataset):
+    """
+    Dataset from Azure LLM Inference Trace.
+    Format: TIMESTAMP,ContextTokens,GeneratedTokens
+    """
+
+    def __init__(self, dataset_path: str, **kwargs) -> None:
+        super().__init__(dataset_path=dataset_path, **kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided.")
+        
+        self.data = pd.read_csv(self.dataset_path)
+        # Ensure timestamps are parsed and sorted
+        self.data['TIMESTAMP'] = pd.to_datetime(self.data['TIMESTAMP'])
+        self.data = self.data.sort_values('TIMESTAMP').reset_index(drop=True)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        ttft_slo: float = 0.5,
+        tpot_slo: float = 0.1,
+        scale_factor: float = 1.0,
+        **kwargs,
+    ) -> list[SLOSampleRequest]:
+        
+        total_rows = len(self.data)
+        
+        # Pick a contiguous slice if possible to preserve arrival pattern
+        if total_rows > num_requests:
+            random.seed(self.random_seed)
+            # Pick a random start point
+            start_idx = random.randint(0, total_rows - num_requests)
+            subset = self.data.iloc[start_idx: start_idx + num_requests].copy()
+        else:
+            subset = self.data.copy()
+            if num_requests > total_rows:
+                logger.warning(f"Requested {num_requests} samples but dataset only has {total_rows}. "
+                               "Returning all available samples.")
+        
+        if len(subset) == 0:
+            return []
+
+        # Normalize timestamps relative to the start of this sample batch
+        start_time = subset['TIMESTAMP'].iloc[0]
+        subset['relative_time'] = (subset['TIMESTAMP'] - start_time).dt.total_seconds() * scale_factor
+        
+        requests = []
+        vocab_size = tokenizer.vocab_size
+        
+        # Iterate and create requests
+        for i, row in subset.iterrows():
+            prompt_len = int(row['ContextTokens'])
+            output_len = int(row['GeneratedTokens'])
+            timestamp = float(row['relative_time'])
+            
+            # Synthetic prompt generation based on row index to be deterministic per row
+            # Using (i + j) to create some variance in token ids
+            token_ids = [(i + j) % vocab_size for j in range(prompt_len)]
+            prompt = tokenizer.decode(token_ids, skip_special_tokens=True)
+
+            if prompt_len < 256:
+                ttft_slo = 0.25
+            elif prompt_len < 1024:
+                ttft_slo = 0.4
+            elif prompt_len <= 8192:
+                ttft_slo = 2.0
+            else:
+                ttft_slo = 4.0
+            
+            requests.append(SLOSampleRequest(
+                prompt=prompt,
+                prompt_len=prompt_len,
+                expected_output_len=output_len,
+                ttft_slo=ttft_slo,
+                tpot_slo=tpot_slo,
+                timestamp=timestamp
+            ))
+        
+        # Print average request rate for reference
+        if len(requests) > 1:
+            total_time = requests[-1].timestamp - requests[0].timestamp
+            avg_rate = len(requests) / total_time if total_time > 0 else float('inf')
+            logger.info(f"Generated {len(requests)} requests over {total_time:.2f} seconds. "
+                        f"Average request rate: {avg_rate:.2f} req/s.")
+            
+        return requests

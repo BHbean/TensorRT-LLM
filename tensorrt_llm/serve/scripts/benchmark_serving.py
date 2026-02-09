@@ -40,9 +40,10 @@ from tensorrt_llm.serve.scripts.backend_request_func import (
     AIOHTTP_TIMEOUT, ASYNC_REQUEST_FUNCS, OPENAI_COMPATIBLE_BACKENDS,
     RequestFuncInput, RequestFuncOutput, get_tokenizer)
 from tensorrt_llm.serve.scripts.benchmark_dataset import (
-    AIMODataset, BurstGPTDataset, ConversationDataset, CustomDataset,
-    HuggingFaceDataset, InstructCoderDataset, RandomDataset, SampleRequest,
-    ShareGPTDataset, SonnetDataset, VisionArenaDataset)
+    AIMODataset, AzureTraceDataset, BurstGPTDataset, BurstGPTTraceDataset,
+    ConversationDataset, CustomDataset, HuggingFaceDataset,
+    InstructCoderDataset, RandomDataset, SampleRequest, ShareGPTDataset,
+    SLOSampleRequest, SonnetDataset, VisionArenaDataset)
 from tensorrt_llm.serve.scripts.benchmark_utils import (
     convert_to_pytorch_benchmark_format, write_to_json)
 # isort: on
@@ -85,6 +86,11 @@ class BenchmarkMetrics:
     std_request_ar: float
     percentiles_request_ar: list[tuple[float, float]]
 
+    # SLO metrics
+    slo_ttft_success_rate: Optional[float]
+    slo_tpot_success_rate: Optional[float]
+    slo_total_success_rate: Optional[float]
+
 
 async def get_request(
     input_requests: list[SampleRequest],
@@ -109,6 +115,18 @@ async def get_request(
             in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
     """
+    if input_requests and isinstance(input_requests[0], SLOSampleRequest):
+        print("Replaying requests based on timestamps from the dataset.")
+        start_time = time.perf_counter()
+        for request in input_requests:
+            now = time.perf_counter()
+            target_time = start_time + request.timestamp
+            delay = target_time - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+            yield request
+        return
+
     input_requests: Iterable[SampleRequest] = iter(input_requests)
 
     # Calculate scale parameter theta to maintain the desired request_rate.
@@ -136,7 +154,7 @@ def calculate_metrics(
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
-) -> tuple[BenchmarkMetrics, list[int], list[float]]:
+) -> tuple[BenchmarkMetrics, list[int], list[float], list[dict], list[float]]:
     actual_output_lens: list[int] = []
     total_input = 0
     completed = 0
@@ -148,6 +166,8 @@ def calculate_metrics(
     e2els: list[float] = []
     tput_user: list[float] = []
     request_ars: list[float] = []  # Request accuracy rates
+    slo_results: list[dict] = []
+
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
@@ -174,6 +194,26 @@ def calculate_metrics(
             e2els.append(outputs[i].latency)
             tput_user.append(output_len / (outputs[i].latency))
 
+            # Check SLO attainment if the request supports it
+            if isinstance(input_requests[i], SLOSampleRequest):
+                ttft_met = outputs[i].ttft <= input_requests[i].ttft_slo
+                tpot_met = True # default for <= 1 output token
+                if output_len > 1:
+                    tpot_met = tpot <= input_requests[i].tpot_slo
+                
+                slo_results.append({
+                    "ttft_met": ttft_met,
+                    "tpot_met": tpot_met,
+                    "total_met": ttft_met and tpot_met,
+                    "ttft_ms": outputs[i].ttft * 1000,
+                    "tpot_ms": tpot * 1000,
+                    "ttft_slo": input_requests[i].ttft_slo,
+                    "tpot_slo": input_requests[i].tpot_slo
+                })
+            else:
+                slo_results.append(None)
+
+
             # Calculate request accuracy rate (num_generated_tokens / (decode_iteration + 1))
             decode_iter = outputs[i].decode_iteration
             if decode_iter >= 0:
@@ -191,6 +231,18 @@ def calculate_metrics(
         else:
             actual_output_lens.append(0)
             request_ars.append(0.0)
+            slo_results.append(None)
+
+    # Calculate SLO statistics
+    slo_ttft_success_rate = None
+    slo_tpot_success_rate = None
+    slo_total_success_rate = None
+    
+    valid_slo_results = [r for r in slo_results if r is not None]
+    if valid_slo_results:
+        slo_ttft_success_rate = sum(1 for r in valid_slo_results if r["ttft_met"]) / len(valid_slo_results)
+        slo_tpot_success_rate = sum(1 for r in valid_slo_results if r["tpot_met"]) / len(valid_slo_results)
+        slo_total_success_rate = sum(1 for r in valid_slo_results if r["total_met"]) / len(valid_slo_results)
 
     if goodput_config_dict:
         valid_metrics = []
@@ -254,8 +306,11 @@ def calculate_metrics(
         std_request_ar=np.std(request_ars or 0),
         percentiles_request_ar=[(p, np.percentile(request_ars or 0, p))
                                 for p in selected_percentiles],
+        slo_ttft_success_rate=slo_ttft_success_rate,
+        slo_tpot_success_rate=slo_tpot_success_rate,
+        slo_total_success_rate=slo_total_success_rate,
     )
-    return metrics, actual_output_lens, request_ars
+    return metrics, actual_output_lens, request_ars, slo_results, all_tpots
 
 
 async def benchmark(
@@ -429,7 +484,7 @@ async def benchmark(
     # Close the session
     await session.close()
 
-    metrics, actual_output_lens, request_ars = calculate_metrics(
+    metrics, actual_output_lens, request_ars, slo_results, tpots = calculate_metrics(
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
@@ -462,6 +517,14 @@ async def benchmark(
     print("{:<40} {:<10.4f}".format("Median Request AR:",
                                     metrics.median_request_ar))
 
+    if metrics.slo_ttft_success_rate is not None:
+        print("{:<40} {:<10.2%}".format("SLO TTFT Success Rate:", metrics.slo_ttft_success_rate))
+    if metrics.slo_tpot_success_rate is not None:
+        print("{:<40} {:<10.2%}".format("SLO TPOT Success Rate:", metrics.slo_tpot_success_rate))
+    if metrics.slo_total_success_rate is not None:
+        print("{:<40} {:<10.2%}".format("SLO Total Success Rate:", metrics.slo_total_success_rate))
+
+
     result = {
         "duration": benchmark_duration,
         "completed": metrics.completed,
@@ -479,11 +542,17 @@ async def benchmark(
         "input_lens": [output.prompt_len for output in outputs],
         "output_lens": actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
+        "tpots": tpots,
         "itls": [output.itl for output in outputs],
         "generated_texts": [output.generated_text for output in outputs],
         "errors": [output.error for output in outputs],
         "request_ars": request_ars,
         "decode_iterations": [output.decode_iteration for output in outputs],
+        "arrival_times": [output.arrival_time for output in outputs],
+        "slo_results": slo_results,
+        "slo_ttft_success_rate": metrics.slo_ttft_success_rate,
+        "slo_tpot_success_rate": metrics.slo_tpot_success_rate,
+        "slo_total_success_rate": metrics.slo_total_success_rate,
     }
 
     def process_one_metric(
@@ -575,7 +644,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
     ignored_metrics = [
-        "ttfts", "itls", "generated_texts", "errors", "request_ars",
+        "ttfts", "tpots", "itls", "generated_texts", "errors", "request_ars",
         "decode_iterations"
     ]
     pt_records = convert_to_pytorch_benchmark_format(
@@ -682,6 +751,20 @@ def main(args: argparse.Namespace):
                                            num_requests=args.num_prompts,
                                            tokenizer=tokenizer,
                                        )
+
+    elif args.dataset_name == "azure_trace":
+        input_requests = AzureTraceDataset(
+            dataset_path=args.dataset_path,
+            random_seed=args.seed).sample(num_requests=args.num_prompts,
+                                          tokenizer=tokenizer,
+                                          scale_factor=args.burstiness)
+
+    elif args.dataset_name == "burstgpt_trace":
+        input_requests = BurstGPTTraceDataset(
+            dataset_path=args.dataset_path,
+            random_seed=args.seed).sample(num_requests=args.num_prompts,
+                                          tokenizer=tokenizer,
+                                          scale_factor=args.burstiness)
 
     else:
         # For datasets that follow a similar structure, use a mapping.
@@ -800,9 +883,9 @@ def main(args: argparse.Namespace):
         if not args.save_detailed:
             # Remove fields with too many data points
             for field in [
-                    "input_lens", "output_lens", "ttfts", "itls",
+                    "input_lens", "output_lens", "ttfts", "tpots", "itls",
                     "generated_texts", "errors", "request_ars",
-                    "decode_iterations"
+                    "decode_iterations", "arrival_times", "slo_results"
             ]:
                 if field in result_json:
                     del result_json[field]
@@ -856,7 +939,8 @@ if __name__ == "__main__":
         type=str,
         default="sharegpt",
         choices=[
-            "sharegpt", "burstgpt", "sonnet", "random", "hf", "trtllm_custom"
+            "sharegpt", "burstgpt", "burstgpt_trace", "sonnet", "random", "hf",
+            "trtllm_custom", "azure_trace"
         ],
         help="Name of the dataset to benchmark on.",
     )
