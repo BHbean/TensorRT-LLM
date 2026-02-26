@@ -192,7 +192,10 @@ def calculate_metrics(
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
-            tput_user.append(output_len / (outputs[i].latency))
+            if outputs[i].latency > 0:
+                tput_user.append(output_len / outputs[i].latency)
+            else:
+                tput_user.append(0.0)
 
             # Check SLO attainment if the request supports it
             if isinstance(input_requests[i], SLOSampleRequest):
