@@ -261,6 +261,17 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::impl(
                 uniqTaskIds.insert(req->getLoraTaskId().value());
             }
         }
+        else if (req->isDisaggGenerationTransmissionInProgress()
+            || req->isDisaggGenerationTransmissionComplete())
+        {
+            // KV cache blocks have already been allocated for these requests in a previous iteration
+            // (via prepareDisaggGenInitRequests), but they are not yet in kGENERATION_IN_PROGRESS state.
+            // We must account for their allocated blocks to avoid over-estimating available capacity,
+            // which would cause "No free blocks left" assertion failures when new requests are scheduled.
+            reservedBlocks.decrementReservedBlocks(*req);
+            if (reservedCrossBlocks)
+                reservedCrossBlocks->decrementReservedBlocks(*req);
+        }
         else if (req->isDisaggGenerationInitState())
         {
             pendingDisGenInitRequests.emplace_back(req);

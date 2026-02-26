@@ -45,7 +45,7 @@ from tensorrt_llm.version import __version__ as VERSION
 from .._utils import nvtx_mark
 
 # yapf: enale
-TIMEOUT_KEEP_ALIVE = 5  # seconds.
+TIMEOUT_KEEP_ALIVE = 75  # seconds.
 
 
 class OpenAIServer:
@@ -56,6 +56,9 @@ class OpenAIServer:
                  server_role: Optional[ServerRole],
                  metadata_server_cfg: MetadataServerConfig):
         self.llm = llm
+        # Limit the number of concurrent requests to prevent the C++ executor from crashing
+        # under high load (e.g. 1000+ QPS).
+        self.request_semaphore = asyncio.Semaphore(1024)
         self.tokenizer = llm.tokenizer
         self.metadata_server = create_metadata_server(metadata_server_cfg)
         self.server_role = server_role
@@ -109,6 +112,7 @@ class OpenAIServer:
             return self.create_error_response(message=str(exc))
 
         self.register_routes()
+        self.lock = asyncio.Lock()
 
     async def await_disconnected(self, raw_request: Request, promise):
         if raw_request is None:
@@ -205,12 +209,21 @@ class OpenAIServer:
         return JSONResponse(content=stats)
     
     async def get_load_stats(self) -> JSONResponse:
-        load_stats = await self.llm.get_load_stats_async()
-        return JSONResponse(content=load_stats)
+        try:
+            async with self.lock:
+                load_stats = await self.llm.get_load_stats_async()
+            return JSONResponse(content=load_stats)
+        except AttributeError:
+             # Return empty stats if executor is shutdown
+            return JSONResponse(content={"numActiveRequests": 0, "numQueuedRequests": 0})
     
     async def get_server_info(self) -> JSONResponse:
-        server_info = await self.llm.get_server_info_async()
-        return JSONResponse(content=server_info)
+        try:
+            server_info = await self.llm.get_server_info_async()
+            return JSONResponse(content=server_info)
+        except AttributeError:
+            # Return empty server info if executor is shutdown (e.g. during scale-down)
+            return JSONResponse(content={}, status_code=503)
 
     async def get_kv_cache_events(self) -> JSONResponse:
         events = []
@@ -223,6 +236,7 @@ class OpenAIServer:
         return JSONResponse(content=events)
 
     async def openai_chat(self, request: ChatCompletionRequest, raw_request: Request) -> Response:
+        await self.request_semaphore.acquire()
 
         def get_role() -> str:
             if request.add_generation_prompt:
@@ -233,14 +247,17 @@ class OpenAIServer:
 
         async def chat_stream_generator(
                 promise: RequestOutput, postproc_params: PostprocParams) -> AsyncGenerator[str, None]:
-            if not self.postproc_worker_enabled:
-                post_processor, args = postproc_params.post_processor, postproc_params.postproc_args
-            async for res in promise:
-                pp_results = res.outputs[0]._postprocess_result if self.postproc_worker_enabled else post_processor(res, args)
-                for pp_res in pp_results:
-                    yield pp_res
-            yield "data: [DONE]\n\n"
-            nvtx_mark("generation ends")
+            try:
+                if not self.postproc_worker_enabled:
+                    post_processor, args = postproc_params.post_processor, postproc_params.postproc_args
+                async for res in promise:
+                    pp_results = res.outputs[0]._postprocess_result if self.postproc_worker_enabled else post_processor(res, args)
+                    for pp_res in pp_results:
+                        yield pp_res
+                yield "data: [DONE]"
+                nvtx_mark("generation ends")
+            finally:
+                self.request_semaphore.release()
 
         async def create_chat_response(
                 promise: RequestOutput, postproc_params: PostprocParams, disaggregated_params: Optional[LlmDisaggregatedParams] = None) -> ChatCompletionResponse:
@@ -305,14 +322,22 @@ class OpenAIServer:
                 postproc_args=postproc_args,
             )
 
-            promise = self.llm.generate_async(
-                inputs=prompt,
-                sampling_params=sampling_params,
-                _postproc_params=postproc_params if self.postproc_worker_enabled else None,
-                streaming=request.stream,
-                lora_request=request.lora_request,
-                disaggregated_params=disaggregated_params
-            )
+            try:
+                async with self.lock:
+                    promise = self.llm.generate_async(
+                        inputs=prompt,
+                        sampling_params=sampling_params,
+                        _postproc_params=postproc_params if self.postproc_worker_enabled else None,
+                        streaming=request.stream,
+                        lora_request=request.lora_request,
+                        disaggregated_params=disaggregated_params
+                    )
+            except RuntimeError as e:
+                # Catch "LLM is shutting down" error from C++ backend
+                if "LLM is shutting down" in str(e):
+                    return self.create_error_response("Service Unavailable: LLM is shutting down", status_code=HTTPStatus.SERVICE_UNAVAILABLE)
+                raise e
+
             asyncio.create_task(self.await_disconnected(raw_request, promise))
             if not self.postproc_worker_enabled:
                 postproc_args.tokenizer = self.tokenizer
@@ -324,16 +349,20 @@ class OpenAIServer:
                                          media_type="text/event-stream")
             else:
                 response = await create_chat_response(promise, postproc_params, disaggregated_params)
+                self.request_semaphore.release()
                 return JSONResponse(content=response.model_dump())
         except CppExecutorError:
+            self.request_semaphore.release()
             logger.error(traceback.format_exc())
             # If internal executor error is raised, shutdown the server
             signal.raise_signal(signal.SIGINT)
         except Exception as e:
+            self.request_semaphore.release()
             logger.error(traceback.format_exc())
             return self.create_error_response(str(e))
 
     async def openai_completion(self, request: CompletionRequest, raw_request: Request) -> Response:
+        await self.request_semaphore.acquire()
 
         async def completion_response(promise: RequestOutput,
                                       postproc_params: Optional[PostprocParams]) -> CompletionResponse:
@@ -403,9 +432,12 @@ class OpenAIServer:
             await asyncio.gather(*tasks)
 
         async def generator_wrapper(generator: AsyncIterator[Any]):
-            async for output in generator:
-                yield output
-            yield "data: [DONE]\n\n"
+            try:
+                async for output in generator:
+                    yield output
+                yield "data: [DONE]"
+            finally:
+                self.request_semaphore.release()
 
         try:
             check_multiple_response(request.n, self.llm.args.backend)
@@ -459,13 +491,16 @@ class OpenAIServer:
             else:
                 rsps = await asyncio.gather(*[completion_response(promise, params)
                                               for promise, params in zip(promises, postproc_params_collection)])
+                self.request_semaphore.release()
                 response = merge_completion_responses(rsps) if len(rsps) > 1 else rsps[0]
                 return JSONResponse(content=response.model_dump())
         except CppExecutorError:
+            self.request_semaphore.release()
             logger.error(traceback.format_exc())
             # If internal executor error is raised, shutdown the server
             signal.raise_signal(signal.SIGINT)
         except Exception as e:
+            self.request_semaphore.release()
             logger.error(traceback.format_exc())
             return self.create_error_response(str(e))
 

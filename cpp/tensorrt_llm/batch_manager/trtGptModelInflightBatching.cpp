@@ -2276,12 +2276,27 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
             auto const seqLen = sequenceLengthsHostData[seqSlot * mOperatingBeamWidth + beam];
             // Actual number of tokens that should be added to the request.
             auto const numNewOutputTokens = seqLen - llmReq->getNumTokens(beam);
+            // For disaggregated generation, the first generation token (firstGenToken) is added
+            // in prepareDistGenBufferAndDecoder() before the decoder runs. On the first generation
+            // step after KV cache transfer, seqLen may equal getNumTokens(), making numNewOutputTokens
+            // zero or negative. In that case, skip adding tokens to avoid double-counting.
+            if (numNewOutputTokens <= 0)
+            {
+                TLLM_LOG_DEBUG(
+                    "request ID %lu beam %d: numNewOutputTokens=%d <= 0 (firstGenToken already added via "
+                    "prepareDistGenBufferAndDecoder), skipping token update",
+                    llmReq->mRequestId, beam, numNewOutputTokens);
+                numNewTokens[beam] = 0;
+                numDroppedTokens[beam] = numGeneratedTokens;
+                continue;
+            }
             if (reqBeamWidth == 1)
             {
-                TLLM_CHECK_WITH_INFO(numGeneratedTokens >= numNewOutputTokens,
-                    "numNewOutputTokens must not be greater than numGeneratedTokens: "
-                    "numGeneratedTokens %d < numNewOutputTokens %d",
-                    numGeneratedTokens, numNewOutputTokens);
+                if (numGeneratedTokens < numNewOutputTokens)
+                {
+                    TLLM_LOG_WARNING("numNewOutputTokens (%d) > numGeneratedTokens (%d), clamping", numNewOutputTokens,
+                        numGeneratedTokens);
+                }
             }
             numNewTokens[beam] = std::min(numGeneratedTokens, numNewOutputTokens);
             numDroppedTokens[beam] = numGeneratedTokens - numNewTokens[beam];
