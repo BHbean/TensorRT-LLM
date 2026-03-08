@@ -388,10 +388,12 @@ class GenerationExecutorProxy(GenerationExecutor):
 
         # 处理可能的状态：READY (原来) 或 PAUSED_NO_MODEL（lazy 模式）
         if ready_signal == GenerationExecutorProxy.READY_SIGNAL:
-            # Record executor info from all workers
+            # Record executor info from workers
+            # In non-lazy_load mode, only the leader (rank 0) sends executor_info
+            # because subordinate ranks exit in block_subordinates() before reaching
+            # the executor_info_queue.put() call. So we only read 1 message.
             self.executor_info_lst.clear()
-            for _ in range(self.model_world_size):
-                self.executor_info_lst.append(self.executor_info_queue.get())
+            self.executor_info_lst.append(self.executor_info_queue.get())
             self.model_loaded = True
         elif ready_signal == GenerationExecutorProxy.PAUSED_SIGNAL:
             self.model_loaded = False
