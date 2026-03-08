@@ -263,8 +263,10 @@ class GenerationResultBase:
             elif finish_reasons[src_idx] == tllm.FinishReason.TIMED_OUT:
                 output.finish_reason = 'timeout'
             # For disaggregated serving, finish reason might be NOT_FINISHED which is ok
+            # This can happen for both context_only (prefill done, generation not started)
+            # and generation_only (e.g. during KV cache transfer or early termination)
             elif finish_reasons[
-                    src_idx] == tllm.FinishReason.NOT_FINISHED and self.disaggregated_params is not None and self.disaggregated_params.request_type == "context_only":
+                    src_idx] == tllm.FinishReason.NOT_FINISHED and self.disaggregated_params is not None:
                 output.finish_reason = 'not_finished'
             elif finish_reasons[src_idx] == tllm.FinishReason.CANCELLED:
                 pass
@@ -309,6 +311,7 @@ class GenerationResultBase:
             self._done = response_result.is_final
             context_phase_params = response_result.context_phase_params
             self.decoding_iter = response_result.decoding_iter
+
             if context_phase_params is not None:
                 self.disaggregated_params = DisaggregatedParams(
                     request_type="context_only",
