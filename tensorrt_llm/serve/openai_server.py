@@ -512,4 +512,5 @@ class OpenAIServer:
                                 port=port,
                                 log_level="info",
                                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
-        await uvicorn.Server(config).serve()
+        self.uvicorn_server = uvicorn.Server(config)
+        await self.uvicorn_server.serve()
