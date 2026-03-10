@@ -527,6 +527,17 @@ async def benchmark(
     if metrics.slo_total_success_rate is not None:
         print("{:<40} {:<10.2%}".format("SLO Total Success Rate:", metrics.slo_total_success_rate))
 
+    # Precompute finish_time and total_time_ms using only successful requests
+    successful_outputs = [output for output in outputs if output.success]
+    if successful_outputs:
+        first_arrival_time = min(output.arrival_time for output in successful_outputs)
+        finish_time = max(output.arrival_time + output.latency for output in successful_outputs)
+        total_time_ms = (finish_time - first_arrival_time) * 1000
+    else:
+        first_arrival_time = 0.0
+        finish_time = 0.0
+        total_time_ms = 0.0
+    print("{:<40} {:<10.2f}".format("Total time (ms):", total_time_ms))
 
     result = {
         "duration": benchmark_duration,
@@ -547,6 +558,7 @@ async def benchmark(
         "ttfts": [output.ttft for output in outputs],
         "tpots": tpots,
         "itls": [output.itl for output in outputs],
+        "e2els": [output.latency for output in outputs],
         "generated_texts": [output.generated_text for output in outputs],
         "errors": [output.error for output in outputs],
         "request_ars": request_ars,
@@ -556,6 +568,9 @@ async def benchmark(
         "slo_ttft_success_rate": metrics.slo_ttft_success_rate,
         "slo_tpot_success_rate": metrics.slo_tpot_success_rate,
         "slo_total_success_rate": metrics.slo_total_success_rate,
+        "benchmark_start_time": first_arrival_time,
+        "benchmark_finish_time": finish_time,
+        "total_time_ms": total_time_ms,
     }
 
     def process_one_metric(
@@ -669,6 +684,7 @@ def main(args: argparse.Namespace):
     random.seed(args.seed)
     np.random.seed(args.seed)
 
+    avg_request_rate = None
     backend = args.backend
     model_id = args.model
     model_name = args.served_model_name
@@ -756,18 +772,24 @@ def main(args: argparse.Namespace):
                                        )
 
     elif args.dataset_name == "azure_trace":
-        input_requests = AzureTraceDataset(
+        azure_dataset = AzureTraceDataset(
             dataset_path=args.dataset_path,
-            random_seed=args.seed).sample(num_requests=args.num_prompts,
-                                          tokenizer=tokenizer,
-                                          scale_factor=args.burstiness)
+            random_seed=args.seed)
+        input_requests = azure_dataset.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            scale_factor=args.burstiness)
+        avg_request_rate = getattr(azure_dataset, "avg_request_rate", None)
 
     elif args.dataset_name == "burstgpt_trace":
-        input_requests = BurstGPTTraceDataset(
+        burstgpt_dataset = BurstGPTTraceDataset(
             dataset_path=args.dataset_path,
-            random_seed=args.seed).sample(num_requests=args.num_prompts,
-                                          tokenizer=tokenizer,
-                                          scale_factor=args.burstiness)
+            random_seed=args.seed)
+        input_requests = burstgpt_dataset.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            scale_factor=args.burstiness)
+        avg_request_rate = getattr(burstgpt_dataset, "avg_request_rate", None)
 
     else:
         # For datasets that follow a similar structure, use a mapping.
@@ -898,6 +920,8 @@ def main(args: argparse.Namespace):
                                        < float("inf") else "inf")
         result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
+        
+        result_json["avg_request_rate"] = avg_request_rate  # QPS
 
         # Save to file
         base_model_id = model_id.split("/")[-1]

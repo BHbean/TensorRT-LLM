@@ -717,6 +717,7 @@ class BurstGPTTraceDataset(BenchmarkDataset):
         if len(requests) > 1:
             total_time = requests[-1].timestamp - requests[0].timestamp
             avg_rate = len(requests) / total_time if total_time > 0 else float('inf')
+            self.avg_request_rate = avg_rate
             logger.info(f"Generated {len(requests)} requests over {total_time:.2f} seconds. "
                         f"Average request rate: {avg_rate:.2f} req/s.")
         
@@ -1168,6 +1169,7 @@ class AzureTraceDataset(BenchmarkDataset):
         if len(requests) > 1:
             total_time = requests[-1].timestamp - requests[0].timestamp
             avg_rate = len(requests) / total_time if total_time > 0 else float('inf')
+            self.avg_request_rate = avg_rate
             logger.info(f"Generated {len(requests)} requests over {total_time:.2f} seconds. "
                         f"Average request rate: {avg_rate:.2f} req/s.")
             
